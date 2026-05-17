@@ -10,6 +10,11 @@ public enum ConnectionType: String, CaseIterable {
 
 public protocol OBDServiceDelegate: AnyObject {
     func connectionStateChanged(state: ConnectionState)
+    func peripheralsUpdated(_ peripherals: [CBPeripheral])
+}
+
+extension OBDServiceDelegate {
+    public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {}
 }
 
 struct Command: Codable {
@@ -46,6 +51,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     @Published public private(set) var connectionState: ConnectionState = .disconnected
     @Published public private(set) var isScanning: Bool = false
     @Published public private(set) var connectedPeripheral: CBPeripheral?
+    @Published public private(set) var peripherals: [CBPeripheral] = []
     @Published public var connectionType: ConnectionType {
         didSet {
             switchConnectionType(connectionType)
@@ -90,6 +96,12 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             if oldState != state {
                 OBDLogger.shared.logConnectionChange(from: oldState, to: state)
             }
+        }
+    }
+
+    public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {
+        DispatchQueue.main.async {
+            self.peripherals = peripherals
         }
     }
 

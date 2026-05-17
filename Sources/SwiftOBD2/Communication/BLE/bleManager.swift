@@ -171,6 +171,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func didDiscover(_: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
         peripheralScanner.addDiscoveredPeripheral(peripheral, advertisementData: advertisementData, rssi: rssi)
+        DispatchQueue.main.async {
+            self.obdDelegate?.peripheralsUpdated(self.peripheralScanner.foundPeripherals)
+        }
     }
 
     func connect(to peripheral: CBPeripheral) {
@@ -342,6 +345,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         messageProcessor.reset()
         peripheralManager.reset()
         peripheralScanner.reset()
+        obdDelegate?.peripheralsUpdated([])
         
         let oldState = connectionState
         connectionState = .disconnected
