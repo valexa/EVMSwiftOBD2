@@ -743,6 +743,23 @@ extension OBDCommand.Mode1 {
         case .noxPMWarningLamp: return CommandProperties("01C8", "NOx / PM warning lamp", 2, .none)
         }
     }
+
+    /// True for SAE-reserved PID slots that have no defined decoding.
+    /// Use this to skip these entries when iterating `allCases` for live queries.
+    public var isReserved: Bool {
+        switch self {
+        case .pid95Reserved, .pid96Reserved, .pid97Reserved,
+             .pidAAReserved, .pidABReserved, .pidACReserved, .pidADReserved,
+             .pidAEReserved, .pidAFReserved, .pidB0Reserved, .pidB1Reserved,
+             .pidB2Reserved, .pidB3Reserved, .pidB4Reserved, .pidB5Reserved,
+             .pidB6Reserved, .pidB7Reserved, .pidB8Reserved, .pidB9Reserved,
+             .pidBAReserved, .pidBBReserved, .pidBCReserved, .pidBDReserved,
+             .pidBEReserved, .pidBFReserved, .pidC1Reserved, .pidC2Reserved:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 extension OBDCommand.Mode6 {

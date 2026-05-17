@@ -227,8 +227,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     func willRestoreState(_: CBCentralManager, dict: [String: Any]) {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral], let peripheral = peripherals.first {
             obdDebug("Restoring peripheral: \(peripherals[0].name ?? "Unnamed")", category: .bluetooth)
-            peripheralManager.connectedPeripheral = peripheral
-            peripheral.delegate = peripheralManager
+            peripheralManager.setPeripheral(peripheral)
         }
     }
 
@@ -241,7 +240,13 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral? = nil) async throws {
         try await waitForPoweredOn()
 
-        guard connectionState == .disconnected else {
+        switch connectionState {
+        case .connectedToAdapter, .connectedToVehicle:
+            obdInfo("Already connected to peripheral", category: .bluetooth)
+            return
+        case .disconnected:
+            break
+        default:
             obdWarning("Cannot connect - state is \(connectionState.description)", category: .bluetooth)
             throw BLEManagerError.connectionInProgress
         }
@@ -345,24 +350,29 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         messageProcessor.reset()
         peripheralManager.reset()
         peripheralScanner.reset()
-        obdDelegate?.peripheralsUpdated([])
-        
+
         let oldState = connectionState
         connectionState = .disconnected
         if oldState != connectionState {
             OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-            
+            obdDelegate?.peripheralsUpdated([])
             DispatchQueue.main.async {
                 self.obdDelegate?.connectionStateChanged(state: .disconnected)
             }
         }
     }
 
-    /// Fully resets BLEManager state for clean reconnection
+    /// Fully resets BLEManager state for clean reconnection.
+    /// Captures the peripheral reference before clearing state so that
+    /// cancelPeripheralConnection is called with a valid reference, and the
+    /// subsequent didDisconnect callback is a safe no-op (all handlers already nil'd).
     public func reset() {
-        disconnectPeripheral()
-        resetConfigure()
+        let connectedPeripheral = peripheralManager.connectedPeripheral
         stopScan()
+        resetConfigure()
+        if let connectedPeripheral {
+            centralManager.cancelPeripheralConnection(connectedPeripheral)
+        }
     }
 }
 
