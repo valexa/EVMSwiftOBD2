@@ -121,6 +121,17 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             OBDLogger.shared.logPerformance("Connection failed", duration: duration, success: false)
             obdError("Connection failed: \(error.localizedDescription)", category: .connection)
+            
+            if let bleError = error as? BLEManagerError {
+                if bleError == .peripheralNotFound || bleError == .scanTimeout {
+                    throw OBDServiceError.noAdapterFound
+                }
+            } else if let scanError = error as? BLEScannerError {
+                if scanError == .peripheralNotFound || scanError == .scanTimeout {
+                    throw OBDServiceError.noAdapterFound
+                }
+            }
+            
             throw OBDServiceError.adapterConnectionFailed(underlyingError: error) // Propagate
         }
     }

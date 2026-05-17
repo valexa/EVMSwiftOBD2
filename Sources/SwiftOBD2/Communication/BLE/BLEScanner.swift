@@ -71,6 +71,14 @@ class BLEPeripheralScanner: ObservableObject {
             }
         }
     }
+
+    func reset() {
+        foundPeripherals.removeAll()
+        if let completion = foundPeripheralCompletion {
+            foundPeripheralCompletion = nil
+            completion?(nil, BLEScannerError.scanTimeout)
+        }
+    }
 }
 // MARK: - CBPeripheralDelegate
 

@@ -15,6 +15,7 @@ protocol CommProtocol {
     func disconnectPeripheral()
     func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral?) async throws
     func scanForPeripherals() async throws
+    func reset()
     var connectionStatePublisher: Published<ConnectionState>.Publisher { get }
     var obdDelegate: OBDServiceDelegate? { get set }
 }
@@ -150,4 +151,8 @@ class WifiManager: CommProtocol {
     }
 
     func scanForPeripherals() async throws {}
+
+    func reset() {
+        disconnectPeripheral()
+    }
 }

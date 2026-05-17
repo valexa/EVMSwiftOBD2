@@ -224,8 +224,8 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     func willRestoreState(_: CBCentralManager, dict: [String: Any]) {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral], let peripheral = peripherals.first {
             obdDebug("Restoring peripheral: \(peripherals[0].name ?? "Unnamed")", category: .bluetooth)
-            peripheralManager.setPeripheral(peripheral)
-
+            peripheralManager.connectedPeripheral = peripheral
+            peripheral.delegate = peripheralManager
         }
     }
 
@@ -238,9 +238,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral? = nil) async throws {
         try await waitForPoweredOn()
 
-        if connectionState.isConnected {
-            obdInfo("Already connected to peripheral", category: .bluetooth)
-            return
+        guard connectionState == .disconnected else {
+            obdWarning("Cannot connect - state is \(connectionState.description)", category: .bluetooth)
+            throw BLEManagerError.connectionInProgress
         }
 
         let targetPeripheral: CBPeripheral
@@ -339,6 +339,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     private func resetConfigure() {
         characteristicHandler.reset()
+        messageProcessor.reset()
+        peripheralManager.reset()
+        peripheralScanner.reset()
         
         let oldState = connectionState
         connectionState = .disconnected
@@ -349,6 +352,13 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
                 self.obdDelegate?.connectionStateChanged(state: .disconnected)
             }
         }
+    }
+
+    /// Fully resets BLEManager state for clean reconnection
+    public func reset() {
+        disconnectPeripheral()
+        resetConfigure()
+        stopScan()
     }
 }
 
@@ -398,6 +408,7 @@ enum BLEManagerError: Error, CustomStringConvertible {
     case unknownError
     case unsupported
     case unauthorized
+    case connectionInProgress
 
     public var description: String {
         switch self {
@@ -429,6 +440,8 @@ enum BLEManagerError: Error, CustomStringConvertible {
             return "Error: Device does not support Bluetooth Low Energy"
         case .unauthorized:
             return "Error: App not authorized to use Bluetooth Low Energy"
+        case .connectionInProgress:
+            return "Error: Connection already active or in progress. Please disconnect before attempting a new connection."
         }
     }
 }

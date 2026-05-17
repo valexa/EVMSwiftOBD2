@@ -87,6 +87,15 @@ class BLEPeripheralManager: NSObject, ObservableObject {
         guard let data = characteristic.value else { return }
         characteristicHandler.handleUpdatedValue(data, from: characteristic)
     }
+
+    func reset() {
+        connectedPeripheral?.delegate = nil
+        connectedPeripheral = nil
+        if let completion = connectionCompletion {
+            connectionCompletion = nil
+            completion?(nil, BLEManagerError.peripheralNotConnected)
+        }
+    }
 }
 
 extension BLEPeripheralManager: CBPeripheralDelegate {
