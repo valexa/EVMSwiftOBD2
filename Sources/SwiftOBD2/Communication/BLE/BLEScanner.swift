@@ -76,7 +76,7 @@ class BLEPeripheralScanner: ObservableObject {
         foundPeripherals.removeAll()
         if let completion = foundPeripheralCompletion {
             foundPeripheralCompletion = nil
-            completion?(nil, BLEScannerError.scanTimeout)
+            completion(nil, BLEScannerError.scanTimeout)
         }
     }
 }

@@ -93,7 +93,7 @@ class BLEPeripheralManager: NSObject, ObservableObject {
         connectedPeripheral = nil
         if let completion = connectionCompletion {
             connectionCompletion = nil
-            completion?(nil, BLEManagerError.peripheralNotConnected)
+            completion(nil, BLEManagerError.peripheralNotConnected)
         }
     }
 }
