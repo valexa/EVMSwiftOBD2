@@ -11,10 +11,12 @@ public enum ConnectionType: String, CaseIterable {
 public protocol OBDServiceDelegate: AnyObject {
     func connectionStateChanged(state: ConnectionState)
     func peripheralsUpdated(_ peripherals: [CBPeripheral])
+    func adapterInfoUpdated(_ info: [String: String])
 }
 
 extension OBDServiceDelegate {
     public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {}
+    public func adapterInfoUpdated(_ info: [String: String]) {}
 }
 
 struct Command: Codable {
@@ -52,6 +54,13 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     @Published public private(set) var isScanning: Bool = false
     @Published public private(set) var connectedPeripheral: CBPeripheral?
     @Published public private(set) var peripherals: [CBPeripheral] = []
+    @Published public private(set) var adapterInfo: [String: String] = [:]
+
+    // Plain Swift callbacks — consumed by the app layer without Combine.
+    public var onConnectionStateChanged: ((ConnectionState) -> Void)?
+    public var onPeripheralsUpdated: (([CBPeripheral]) -> Void)?
+    public var onScanningChanged: ((Bool) -> Void)?
+    public var onAdapterInfoUpdated: (([String: String]) -> Void)?
     @Published public var connectionType: ConnectionType {
         didSet {
             switchConnectionType(connectionType)
@@ -96,12 +105,21 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             if oldState != state {
                 OBDLogger.shared.logConnectionChange(from: oldState, to: state)
             }
+            self.onConnectionStateChanged?(state)
         }
     }
 
     public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {
         DispatchQueue.main.async {
             self.peripherals = peripherals
+            self.onPeripheralsUpdated?(peripherals)
+        }
+    }
+
+    public func adapterInfoUpdated(_ info: [String: String]) {
+        DispatchQueue.main.async {
+            self.adapterInfo = info
+            self.onAdapterInfoUpdated?(info)
         }
     }
 
@@ -110,13 +128,13 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     /// - Parameter preferedProtocol: The optional OBD2 protocol to use (if supported).
     /// - Returns: Information about the connected vehicle (`OBDInfo`).
     /// - Throws: Errors that might occur during the connection process.
-    public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7) async throws -> OBDInfo {
+    public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7, peripheral: CBPeripheral? = nil) async throws -> OBDInfo {
         let startTime = CFAbsoluteTimeGetCurrent()
         obdInfo("Starting connection with timeout: \(timeout)s", category: .connection)
-        
+
         do {
             obdDebug("Connecting to adapter...", category: .connection)
-            try await elm327.connectToAdapter(timeout: timeout)
+            try await elm327.connectToAdapter(timeout: timeout, peripheral: peripheral)
             
             obdDebug("Initializing adapter...", category: .connection)
             try await elm327.adapterInitialization()
@@ -326,9 +344,13 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     public func scanForPeripherals() async throws {
         do {
             self.isScanning = true
+            onScanningChanged?(true)
             try await elm327.scanForPeripherals()
             self.isScanning = false
+            onScanningChanged?(false)
         } catch {
+            self.isScanning = false
+            onScanningChanged?(false)
             throw OBDServiceError.scanFailed(underlyingError: error)
         }
     }

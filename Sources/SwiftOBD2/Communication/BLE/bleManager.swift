@@ -107,6 +107,12 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         characteristicHandler = BLECharacteristicHandler(messageProcessor: messageProcessor)
         peripheralManager = BLEPeripheralManager(characteristicHandler: characteristicHandler)
         peripheralScanner = BLEPeripheralScanner()
+
+        characteristicHandler.onDeviceInfoUpdated = { [weak self] info in
+            DispatchQueue.main.async {
+                self?.obdDelegate?.adapterInfoUpdated(info)
+            }
+        }
     }
 
     // MARK: - Central Manager Control Methods
@@ -162,11 +168,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func centralManagerDidPowerOn() {
-        guard let device = peripheralManager.connectedPeripheral else {
-            startScanning(BLEPeripheralScanner.supportedServices)
-            return
-        }
-        connect(to: device)
+        // Never auto-connect on power-on — the user must explicitly initiate.
+        // A previously restored peripheral lands in the scan list via willRestoreState.
+        startScanning(nil)
     }
 
     func didDiscover(_: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
@@ -204,11 +208,14 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         let peripheralName = peripheral.name ?? "Unnamed"
         let errorMsg = error?.localizedDescription ?? "Unknown error"
         obdError("Connection failed to peripheral: \(peripheralName) - \(errorMsg)", category: .bluetooth)
-        
+
+        // Clean up peripheral state so a retry can proceed from a fresh baseline.
+        peripheralManager.reset()
+
         let oldState = connectionState
         connectionState = .error
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-        
+
         DispatchQueue.main.async {
             self.obdDelegate?.connectionStateChanged(state: .error)
         }
@@ -225,9 +232,13 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func willRestoreState(_: CBCentralManager, dict: [String: Any]) {
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral], let peripheral = peripherals.first {
-            obdDebug("Restoring peripheral: \(peripherals[0].name ?? "Unnamed")", category: .bluetooth)
-            peripheralManager.setPeripheral(peripheral)
+        // Add restored peripherals to the discovered list so they appear in the UI,
+        // but do NOT set them as the managed peripheral — the user decides to connect.
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
+            for peripheral in peripherals {
+                obdDebug("Restoring peripheral to scan list: \(peripheral.name ?? "Unnamed")", category: .bluetooth)
+                peripheralScanner.addDiscoveredPeripheral(peripheral, advertisementData: [:], rssi: -60)
+            }
         }
     }
 
@@ -244,11 +255,13 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         case .connectedToAdapter, .connectedToVehicle:
             obdInfo("Already connected to peripheral", category: .bluetooth)
             return
-        case .disconnected:
-            break
-        default:
-            obdWarning("Cannot connect - state is \(connectionState.description)", category: .bluetooth)
+        case .connecting:
+            // Another connection attempt is genuinely in flight — don't stack on top.
+            obdWarning("Cannot connect - already connecting", category: .bluetooth)
             throw BLEManagerError.connectionInProgress
+        default:
+            // .disconnected and .error are both recoverable starting points.
+            break
         }
 
         let targetPeripheral: CBPeripheral
