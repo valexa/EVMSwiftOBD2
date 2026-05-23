@@ -461,4 +461,5 @@ public struct VINInfo: Codable, Hashable {
     public let Model: String
     public let ModelYear: String
     public let EngineCylinders: String
+    public let Trim: String?
 }

@@ -323,6 +323,8 @@ public enum Decoders: Equatable, Encodable {
                 return MonitorDecoder()
             case .encoded_string:
                 return StringDecoder()
+            case .cvn:
+                return CVNDecoder()
             case .uas(let id):
                 let decoder = UASDecoder(id: id)
                 return decoder
@@ -691,6 +693,17 @@ struct StringDecoder: Decoder {
                                   options: .regularExpression)
 
         return .success(.stringResult(string))
+    }
+}
+
+// Formats the 4-byte Calibration Verification Number as an 8-char uppercase hex string.
+// After sendCommand dropFirst, data layout: [PID(06), count(01), b0, b1, b2, b3]
+struct CVNDecoder: Decoder {
+    func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
+        guard data.count >= 6 else { return .failure(.invalidData) }
+        let cvnBytes = data.dropFirst(2).prefix(4)
+        let hex = cvnBytes.map { String(format: "%02X", $0) }.joined()
+        return .success(.stringResult(hex))
     }
 }
 
