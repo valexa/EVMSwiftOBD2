@@ -168,9 +168,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func centralManagerDidPowerOn() {
-        // Never auto-connect on power-on — the user must explicitly initiate.
-        // A previously restored peripheral lands in the scan list via willRestoreState.
-        startScanning(nil)
+        // Scanning is initiated explicitly by the caller (Dongle tab / scanForDevices).
     }
 
     func didDiscover(_: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
