@@ -60,13 +60,10 @@ class BLEMessageProcessor {
 
 
     func waitForResponse(timeout: TimeInterval) async throws -> [String] {
-            try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
+        try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
+            try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
-
-                    // Check if there's already a pending command
                     assert(messageCompletion == nil, "Concurrent command detected")
-
-
                     messageCompletion = { response, error in
                         if let response = response {
                             continuation.resume(returning: response)
@@ -76,10 +73,14 @@ class BLEMessageProcessor {
                             continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
                         }
                     }
-
                 }
+            } onCancel: { [self] in
+                let pending = messageCompletion
+                messageCompletion = nil
+                pending?(nil, BLEMessageProcessorError.responseTimeout)
             }
         }
+    }
 
     func reset() {
            buffer.removeAll()
