@@ -462,10 +462,10 @@ struct FuelTypeDecoder: Decoder {
         guard let i = bytes.first else {
             return .failure(.invalidData)
         }
-        guard Int(i) < FuelTypes.count else {
+        guard let value = FuelTypes[safe: Int(i)] else {
             return .failure(.invalidData)
         }
-        return .success(.stringResult(FuelTypes[Int(i)]))
+        return .success(.stringResult(value))
     }
 }
 
