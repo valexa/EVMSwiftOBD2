@@ -61,10 +61,22 @@ struct BitArray {
     func value(at range: Range<Int>) -> UInt8 {
         var value: UInt8 = 0
         for bit in range {
+            guard let bitValue = binaryArray[safe: bit] else { return 0 }
             value = value << 1
-            value = value | UInt8(binaryArray[bit])
+            value = value | UInt8(bitValue)
         }
         return value
+    }
+}
+
+extension Collection where Index == Int {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+
+    subscript(safe range: Range<Int>) -> SubSequence? {
+        guard range.lowerBound >= startIndex, range.upperBound <= endIndex else { return nil }
+        return self[range]
     }
 }
 
@@ -367,10 +379,11 @@ struct MonitorDecoder: Decoder {
     }
 
     func parse_monitor_test(_ data: Data) -> MonitorTest? {
+        let bytes = Array(data)
         var test = MonitorTest()
 
-        let tid = data[1]
-        let cid = data[2]
+        let tid = bytes[1]
+        let cid = bytes[2]
 
         if let testInfo = TestIds[tid] {
             test.name = testInfo.0
@@ -445,27 +458,24 @@ struct AbsEvapPressureDecoder: Decoder {
 
 struct FuelTypeDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 0 else {
+        let bytes = Array(data)
+        guard let i = bytes.first else {
             return .failure(.invalidData)
         }
-        let i = data[0]
-        var value: String?
-        if i < FuelTypes.count {
-            value = FuelTypes[Int(i)]
-        }
-        guard let value = value else {
+        guard Int(i) < FuelTypes.count else {
             return .failure(.invalidData)
         }
-        return .success(.stringResult((value)))
+        return .success(.stringResult(FuelTypes[Int(i)]))
     }
 }
 
 struct MaxMafDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 0 else {
+        let bytes = Array(data)
+        guard let first = bytes.first else {
             return .failure(.invalidData)
         }
-        let value = data[0] * 10
+        let value = first * 10
         return .success((.measurementResult(MeasurementResult(value: Double(value), unit: Unit.gramsPerSecond))))
     }
 }
@@ -480,12 +490,13 @@ struct AbsoluteLoadDecoder: Decoder {
 
 struct EvapPressureDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 1 else {
+        let bytes = Array(data)
+        guard bytes.count > 1 else {
             return .failure(.invalidData)
         }
-        
-        let a = twosComp(Int(data[0]), length: 8)
-        let b = twosComp(Int(data[1]), length: 8)
+
+        let a = twosComp(Int(bytes[0]), length: 8)
+        let b = twosComp(Int(bytes[1]), length: 8)
 
         let value = ((Double(a) * 256.0) + Double(b)) / 4.0
         return .success((.measurementResult(MeasurementResult(value: value, unit: UnitPressure.kilopascals))))
@@ -554,11 +565,12 @@ struct O2SensorsAltDecoder: Decoder {
 
 struct OBDComplianceDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 1 else {
+        let bytes = Array(data)
+        guard bytes.count > 1 else {
             return .failure(.invalidData)
         }
-        
-        let i = data[1]
+
+        let i = bytes[1]
 
         if i < OBD_COMPLIANCE.count {
             return .success(.stringResult((OBD_COMPLIANCE[Int(i)])))
@@ -736,11 +748,15 @@ struct StatusDecoder: Decoder {
 
         // convert to binaryarray
         let bits = BitArray(data: data)
+        guard bits.binaryArray.count >= 16 else {
+            return .failure(.invalidData)
+        }
 
         var output = Status()
         output.MIL = bits.binaryArray[0] == 1
         output.dtcCount = bits.value(at: 1 ..< 8)
-        output.ignitionType = IGNITIONTYPE[bits.binaryArray[12]]
+        let ignitionBit = bits.binaryArray[12]
+        output.ignitionType = ignitionBit < IGNITIONTYPE.count ? IGNITIONTYPE[ignitionBit] : "Unknown"
 
         // load the 3 base tests that are always present
 
