@@ -235,7 +235,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
             for peripheral in peripherals {
                 obdDebug("Restoring peripheral to scan list: \(peripheral.name ?? "Unnamed")", category: .bluetooth)
-                peripheralScanner.addDiscoveredPeripheral(peripheral, advertisementData: [:], rssi: -60)
+                peripheralScanner.restorePeripheral(peripheral)
             }
         }
     }
