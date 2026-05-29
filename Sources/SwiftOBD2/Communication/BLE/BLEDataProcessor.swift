@@ -7,6 +7,9 @@ class BLEMessageProcessor {
     private var buffer = Data()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEMessageProcessor")
     private var messageCompletion: (([String]?, Error?) -> Void)?
+    /// When true, a timeout in waitForResponse returns buffered data instead of throwing.
+    /// Used by sendMonitorCommand to capture ELM327 AT MA / AT MT streaming output.
+    var monitorMode = false
 
     func processReceivedData(_ data: Data) {
         buffer.append(data)
@@ -60,25 +63,40 @@ class BLEMessageProcessor {
 
 
     func waitForResponse(timeout: TimeInterval) async throws -> [String] {
-        try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
-                    assert(messageCompletion == nil, "Concurrent command detected")
-                    messageCompletion = { response, error in
-                        if let response = response {
-                            continuation.resume(returning: response)
-                        } else if let error = error {
-                            continuation.resume(throwing: error)
-                        } else {
-                            continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
+        do {
+            return try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
+                try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
+                        assert(messageCompletion == nil, "Concurrent command detected")
+                        messageCompletion = { response, error in
+                            if let response = response {
+                                continuation.resume(returning: response)
+                            } else if let error = error {
+                                continuation.resume(throwing: error)
+                            } else {
+                                continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
+                            }
                         }
                     }
+                } onCancel: { [self] in
+                    let pending = messageCompletion
+                    messageCompletion = nil
+                    pending?(nil, BLEMessageProcessorError.responseTimeout)
                 }
-            } onCancel: { [self] in
-                let pending = messageCompletion
-                messageCompletion = nil
-                pending?(nil, BLEMessageProcessorError.responseTimeout)
             }
+        } catch BLEMessageProcessorError.responseTimeout where monitorMode {
+            // In monitor mode the ELM327 streams frames without a '>' terminator;
+            // return whatever accumulated in the buffer rather than throwing.
+            monitorMode = false
+            let captured = buffer
+            buffer.removeAll()
+            messageCompletion = nil
+            guard let string = String(data: captured, encoding: .utf8), !string.isEmpty else { return [] }
+            return string
+                .replacingOccurrences(of: ">", with: "")
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
         }
     }
 

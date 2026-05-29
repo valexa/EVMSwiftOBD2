@@ -179,6 +179,10 @@ class MOCKComm: CommProtocol {
         }
     }
 
+    func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
+        return []
+    }
+
     func disconnectPeripheral() {
         connectionState = .disconnected
         obdDelegate?.connectionStateChanged(state: .disconnected)

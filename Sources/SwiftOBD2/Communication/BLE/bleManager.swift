@@ -337,7 +337,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         }
 
         obdDebug("Sending command: \(command)", category: .communication)
-        
+
         do {
             try characteristicHandler.writeCommand(command, to: peripheral)
             let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
@@ -347,6 +347,21 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
             throw error
         }
+    }
+
+    func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
+        guard let peripheral = peripheralManager.connectedPeripheral else {
+            throw BLEManagerError.missingPeripheralOrCharacteristic
+        }
+        messageProcessor.monitorMode = true
+        // Always reset monitorMode when this call returns, whether via timeout or a
+        // normal response (e.g. the adapter replies "?" immediately with a ">").
+        defer { messageProcessor.monitorMode = false }
+        try characteristicHandler.writeCommand(command, to: peripheral)
+        let frames = try await messageProcessor.waitForResponse(timeout: duration)
+        // Send a bare CR to stop ELM327 monitoring mode (ignored if already stopped)
+        try? characteristicHandler.writeCommand("", to: peripheral)
+        return frames
     }
 
 

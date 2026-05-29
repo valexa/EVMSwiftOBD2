@@ -255,6 +255,10 @@ class ELM327 {
         try await comm.sendCommand(message, retries: retries)
     }
 
+    func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
+        try await comm.sendMonitorCommand(command, duration: duration)
+    }
+
     private func okResponse(_ message: String) async throws -> [String] {
         let response = try await sendCommand(message)
         if response.contains("OK") {

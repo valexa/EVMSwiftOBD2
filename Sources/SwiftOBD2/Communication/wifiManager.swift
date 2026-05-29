@@ -12,6 +12,9 @@ import OSLog
 
 protocol CommProtocol {
     func sendCommand(_ command: String, retries: Int) async throws -> [String]
+    /// Sends a command that puts the adapter into streaming/monitor mode (e.g. AT MA, AT MT).
+    /// Collects frames for `duration` seconds, then stops and returns them.
+    func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String]
     func disconnectPeripheral()
     func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral?) async throws
     func scanForPeripherals() async throws
@@ -71,6 +74,11 @@ class WifiManager: CommProtocol {
         }
         logger.info("Sending: \(command)")
         return try await sendCommandInternal(data: data, retries: retries)
+    }
+
+    func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
+        // WiFi uses a single-receive model; attempt a one-shot read with a generous timeout.
+        (try? await sendCommand(command, retries: 0)) ?? []
     }
 
     private func sendCommandInternal(data: Data, retries: Int) async throws -> [String] {

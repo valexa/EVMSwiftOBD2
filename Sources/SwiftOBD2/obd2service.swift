@@ -333,6 +333,14 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
         }
     }
 
+    public func sendMonitorCommandInternal(_ command: String, duration: TimeInterval) async throws -> [String] {
+        do {
+            return try await elm327.sendMonitorCommand(command, duration: duration)
+        } catch {
+            throw OBDServiceError.commandFailed(command: command, error: error)
+        }
+    }
+
     public func connectToPeripheral(peripheral: CBPeripheral) async throws {
         do {
             try await elm327.connectToAdapter(timeout: 5, peripheral: peripheral)
