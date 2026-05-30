@@ -5,6 +5,7 @@ import Foundation
 public enum ConnectionType: String, CaseIterable {
     case bluetooth = "Bluetooth"
     case wifi = "Wi-Fi"
+    case serial = "USB Serial"
     case demo = "Demo"
 }
 
@@ -89,6 +90,12 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             elm327 = ELM327(comm: bleManager)
         case .wifi:
             elm327 = ELM327(comm: WifiManager())
+        case .serial:
+            #if os(iOS)
+            elm327 = ELM327(comm: SerialManager())
+            #else
+            elm327 = ELM327(comm: MOCKComm())
+            #endif
         case .demo:
             elm327 = ELM327(comm: MOCKComm())
         }
@@ -196,6 +203,12 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             elm327 = ELM327(comm: bleManager)
         case .wifi:
             elm327 = ELM327(comm: WifiManager())
+        case .serial:
+            #if os(iOS)
+            elm327 = ELM327(comm: SerialManager())
+            #else
+            elm327 = ELM327(comm: MOCKComm())
+            #endif
         case .demo:
             elm327 = ELM327(comm: MOCKComm())
         }
