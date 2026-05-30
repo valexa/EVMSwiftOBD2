@@ -309,6 +309,29 @@ class ELM327 {
         return dtcs
     }
 
+    func scanForUDSDTCs(header: String) async throws -> [TroubleCode] {
+        _ = try? await sendCommand("ATSH\(header)", retries: 1)
+        let response = try await sendCommand("19 02 FF")
+        guard let messages = try canProtocol?.parse(response) else { return [] }
+        return messages.compactMap(\.data).flatMap(parseUDS19Data)
+    }
+
+    private func parseUDS19Data(_ data: Data) -> [TroubleCode] {
+        let bytes = Array(data)
+        // UDS $19/$02 response: 59 02 [status_mask] then 4-byte groups [b1 b2 b3 status]
+        guard bytes.count >= 3, bytes[0] == 0x59, bytes[1] == 0x02 else { return [] }
+        var result: [TroubleCode] = []
+        var i = 3
+        while i + 3 <= bytes.count {
+            let b1 = bytes[i], b2 = bytes[i + 1]
+            if (b1 != 0 || b2 != 0), let tc = parseDTC(Data([b1, b2])) {
+                result.append(tc)
+            }
+            i += 4
+        }
+        return result
+    }
+
     func clearTroubleCodes() async throws {
         let command = OBDCommand.Mode4.CLEAR_DTC
         _ = try await sendCommand(command.properties.command)

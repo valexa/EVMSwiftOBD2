@@ -295,6 +295,15 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         }
     }
 
+    /// Scans a specific ECU for DTCs using UDS Service $19 (readDTCByStatusMask).
+    public func scanForUDSDTCs(header: String) async throws -> [TroubleCode] {
+        do {
+            return try await elm327.scanForUDSDTCs(header: header)
+        } catch {
+            throw OBDServiceError.scanFailed(underlyingError: error)
+        }
+    }
+
     /// Clears the trouble codes found on the vehicle.
     ///  - Throws: Errors that might occur during the request process.
     ///     - `OBDServiceError.notConnectedToVehicle` if the adapter is not connected to a vehicle.

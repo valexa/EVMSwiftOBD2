@@ -17,6 +17,7 @@ public enum ECUID: UInt8, Codable {
     case engine = 0x00
     case transmission = 0x01
     case unknown = 0x02
+    case becm = 0x04
 
     public var description: String {
         switch self {
@@ -26,6 +27,8 @@ public enum ECUID: UInt8, Codable {
             return "Transmission"
         case .unknown:
             return "Unknown"
+        case .becm:
+            return "BECM"
         }
     }
 }
