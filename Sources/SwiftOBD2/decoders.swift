@@ -102,12 +102,14 @@ class UAS {
     let scale: Double
     var unit: Unit
     let offset: Double
+    let minBytes: Int
 
-    init(signed: Bool, scale: Double, unit: Unit, offset: Double = 0.0) {
+    init(signed: Bool, scale: Double, unit: Unit, offset: Double = 0.0, minBytes: Int = 1) {
         self.signed = signed
         self.scale = scale
         self.unit = unit
         self.offset = offset
+        self.minBytes = minBytes
     }
 
     func decode(bytes: Data, _ unit_: MeasurementUnit = .metric) -> MeasurementResult {
@@ -159,44 +161,46 @@ func twosComp(_ value: Int, length: Int) -> Int {
 
 private var uasIDS: [UInt8: UAS] = {
     return [
-    // Unsigned
+    // Unsigned — 1-byte types (minBytes defaults to 1)
     0x01: UAS(signed: false, scale: 1.0, unit: Unit.count),
     0x02: UAS(signed: false, scale: 0.1, unit: Unit.count),
     0x03: UAS(signed: false, scale: 0.01, unit: Unit.count),
     0x04: UAS(signed: false, scale: 0.001, unit: Unit.count),
     0x05: UAS(signed: false, scale: 0.0000305, unit: Unit.count),
     0x06: UAS(signed: false, scale: 0.000305, unit: Unit.count),
-    0x07: UAS(signed: false, scale: 0.25, unit: Unit.rpm),
-    0x09: UAS(signed: false, scale: 1, unit: UnitSpeed.kilometersPerHour),
+    // Multi-byte types — minBytes: 2 rejects garbage 1-byte default responses (e.g. 0x11)
+    0x07: UAS(signed: false, scale: 0.25, unit: Unit.rpm, minBytes: 2),
+    0x09: UAS(signed: false, scale: 1, unit: UnitSpeed.kilometersPerHour, minBytes: 2),
 
-    0x0A: UAS(signed: false, scale: 0.122, unit: UnitElectricPotentialDifference.millivolts),
-    0x0B: UAS(signed: false, scale: 0.001, unit: UnitElectricPotentialDifference.volts),
+    0x0A: UAS(signed: false, scale: 0.122, unit: UnitElectricPotentialDifference.millivolts, minBytes: 2),
+    0x0B: UAS(signed: false, scale: 0.001, unit: UnitElectricPotentialDifference.volts, minBytes: 2),
 
-    0x10: UAS(signed: false, scale: 1, unit: UnitDuration.milliseconds),
-    0x11: UAS(signed: false, scale: 100, unit: UnitDuration.milliseconds),
-    0x12: UAS(signed: false, scale: 1, unit: UnitDuration.seconds),
-    0x13: UAS(signed: false, scale: 1, unit: UnitElectricResistance.microohms),
-    0x14: UAS(signed: false, scale: 1, unit: UnitElectricResistance.ohms),
-    0x15: UAS(signed: false, scale: 1, unit: UnitElectricResistance.kiloohms),
-    0x16: UAS(signed: false, scale: 0.1, unit: UnitTemperature.celsius, offset: -40.0),
-    0x17: UAS(signed: false, scale: 0.01, unit: UnitPressure.kilopascals),
-    0x18: UAS(signed: false, scale: 0.0117, unit: UnitPressure.kilopascals),
-    0x19: UAS(signed: false, scale: 0.079, unit: UnitPressure.kilopascals),
-    0x1A: UAS(signed: false, scale: 1, unit: UnitPressure.kilopascals),
-    0x1B: UAS(signed: false, scale: 10, unit: UnitPressure.kilopascals),
-    0x1C: UAS(signed: false, scale: 0.01, unit: UnitAngle.degrees),
-    0x1D: UAS(signed: false, scale: 0.5, unit: UnitAngle.degrees),
-    // unit ratio
-    0x1E: UAS(signed: false, scale: 0.0000305, unit: Unit.ratio),
-    0x1F: UAS(signed: false, scale: 0.05, unit: Unit.ratio),
-    0x20: UAS(signed: false, scale: 0.00390625, unit: Unit.ratio),
-    0x21: UAS(signed: false, scale: 1, unit: UnitFrequency.millihertz),
-    0x22: UAS(signed: false, scale: 1, unit: UnitFrequency.hertz),
-    0x23: UAS(signed: false, scale: 1, unit: UnitFrequency.kilohertz),
-    0x24: UAS(signed: false, scale: 1, unit: Unit.count),
-    0x25: UAS(signed: false, scale: 1, unit: UnitLength.kilometers),
+    0x10: UAS(signed: false, scale: 1, unit: UnitDuration.milliseconds, minBytes: 2),
+    0x11: UAS(signed: false, scale: 100, unit: UnitDuration.milliseconds, minBytes: 2),
+    0x12: UAS(signed: false, scale: 1, unit: UnitDuration.seconds, minBytes: 2),
+    0x13: UAS(signed: false, scale: 1, unit: UnitElectricResistance.microohms, minBytes: 2),
+    0x14: UAS(signed: false, scale: 1, unit: UnitElectricResistance.ohms, minBytes: 2),
+    0x15: UAS(signed: false, scale: 1, unit: UnitElectricResistance.kiloohms, minBytes: 2),
+    0x16: UAS(signed: false, scale: 0.1, unit: UnitTemperature.celsius, offset: -40.0, minBytes: 2),
+    0x17: UAS(signed: false, scale: 0.01, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x18: UAS(signed: false, scale: 0.0117, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x19: UAS(signed: false, scale: 0.079, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x1A: UAS(signed: false, scale: 1, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x1B: UAS(signed: false, scale: 10, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x1C: UAS(signed: false, scale: 0.01, unit: UnitAngle.degrees, minBytes: 2),
+    0x1D: UAS(signed: false, scale: 0.5, unit: UnitAngle.degrees, minBytes: 2),
+    // unit ratio — 4-byte lambda/voltage combos
+    0x1E: UAS(signed: false, scale: 0.0000305, unit: Unit.ratio, minBytes: 2),
+    0x1F: UAS(signed: false, scale: 0.05, unit: Unit.ratio, minBytes: 2),
+    0x20: UAS(signed: false, scale: 0.00390625, unit: Unit.ratio, minBytes: 2),
+    0x21: UAS(signed: false, scale: 1, unit: UnitFrequency.millihertz, minBytes: 2),
+    0x22: UAS(signed: false, scale: 1, unit: UnitFrequency.hertz, minBytes: 2),
+    0x23: UAS(signed: false, scale: 1, unit: UnitFrequency.kilohertz, minBytes: 2),
+    0x24: UAS(signed: false, scale: 1, unit: Unit.count, minBytes: 2),
+    0x25: UAS(signed: false, scale: 1, unit: UnitLength.kilometers, minBytes: 2),
 
-    0x27: UAS(signed: false, scale: 0.01, unit: Unit.gramsPerSecond),
+    0x27: UAS(signed: false, scale: 0.01, unit: Unit.gramsPerSecond, minBytes: 2),
+    0x34: UAS(signed: false, scale: 1, unit: UnitDuration.minutes, minBytes: 2),
 
     // Signed
     0x81: UAS(signed: true, scale: 1.0, unit: Unit.count),
@@ -725,6 +729,9 @@ struct UASDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
         guard let uas = uasIDS[id] else {
             return .failure(.invalidData)
+        }
+        guard data.count >= uas.minBytes else {
+            return .failure(.noData)
         }
         return .success((.measurementResult(uas.decode(bytes: data, unit))))
     }

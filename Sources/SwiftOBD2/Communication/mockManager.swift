@@ -346,6 +346,16 @@ extension OBDCommand {
                     let warmUp = Int.random(in: 0...40)
                     let hexWarmUp = String(format: "%02X", warmUp)
                     return "30" + " 00 00 " + hexWarmUp
+                case .timeSinceDTCCleared:
+                    let mins = Int.random(in: 0...6550)
+                    let A = mins / 256
+                    let B = mins % 256
+                    return "4E" + " " + String(format: "%02X", A) + " " + String(format: "%02X", B)
+                case .runTimeMIL:
+                    let mins = Int.random(in: 0...6550)
+                    let A = mins / 256
+                    let B = mins % 256
+                    return "4D" + " " + String(format: "%02X", A) + " " + String(format: "%02X", B)
                 case .hybridBatteryLife:
                     let life = Int.random(in: 100...65500)
                  
