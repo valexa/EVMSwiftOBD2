@@ -18,7 +18,7 @@ import Combine
 import CoreBluetooth
 import Foundation
 
-public enum ConnectionState: Sendable {
+public enum ConnectionState: Sendable, Equatable {
     case disconnected
     case connecting
     case connectedToAdapter
@@ -359,8 +359,11 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         defer { messageProcessor.monitorMode = false }
         try characteristicHandler.writeCommand(command, to: peripheral)
         let frames = try await messageProcessor.waitForResponse(timeout: duration)
-        // Send a bare CR to stop ELM327 monitoring mode (ignored if already stopped)
+        // Send a bare CR to stop ELM327 monitoring mode, then drain the resulting
+        // "STOPPED\r>" acknowledgment. Without this drain, STOPPED can arrive after
+        // we return and corrupt the next command's waitForResponse.
         try? characteristicHandler.writeCommand("", to: peripheral)
+        _ = try? await messageProcessor.waitForResponse(timeout: 1.0)
         return frames
     }
 

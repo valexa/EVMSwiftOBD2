@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct TroubleCode: Codable, Hashable, Comparable {
+public struct TroubleCode: Codable, Hashable, Comparable, Sendable {
     public static func < (lhs: TroubleCode, rhs: TroubleCode) -> Bool {
         lhs.code < rhs.code
     }

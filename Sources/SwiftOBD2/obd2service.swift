@@ -49,7 +49,7 @@ public class ConfigurationService {
 ///   - Sending and receiving OBD2 commands.
 ///   - Providing information about the vehicle.
 ///   - Managing the connection state.
-public class OBDService: ObservableObject, OBDServiceDelegate {
+public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendable {
     @Published public private(set) var connectionState: ConnectionState = .disconnected
     @Published public private(set) var isScanning: Bool = false
     @Published public private(set) var connectedPeripheral: CBPeripheral?

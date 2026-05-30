@@ -71,7 +71,7 @@ public struct CommandProperties: Encodable {
     }
 }
 
-public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
+public enum OBDCommand: Codable, Hashable, Comparable, Identifiable, Sendable {
     case general(General)
     case mode1(Mode1)
     case mode3(Mode3)
@@ -98,7 +98,7 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
         }
     }
 
-    public enum General: CaseIterable, Codable, Comparable {
+    public enum General: CaseIterable, Codable, Comparable, Sendable {
         case ATD
         case ATZ
         case ATRV
@@ -111,7 +111,7 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
         case ATDPN
     }
 
-    public enum Protocols: CaseIterable, Codable, Comparable {
+    public enum Protocols: CaseIterable, Codable, Comparable, Sendable {
         case ATSP0
         case ATSP6
         public var properties: CommandProperties {
@@ -123,7 +123,7 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
         }
     }
 
-    public enum Mode1: CaseIterable, Codable, Comparable {
+    public enum Mode1: CaseIterable, Codable, Comparable, Sendable {
         case pidsA
         case status
         case freezeDTC
@@ -336,7 +336,7 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
         case noxPMWarningLamp // 01C8
     }
 
-    public enum Mode3: CaseIterable, Codable, Comparable {
+    public enum Mode3: CaseIterable, Codable, Comparable, Sendable {
         case GET_DTC
         var properties: CommandProperties {
             switch self {
@@ -354,7 +354,7 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
         }
     }
 
-    public enum Mode6: CaseIterable, Codable, Comparable {
+    public enum Mode6: CaseIterable, Codable, Comparable, Sendable {
         case MIDS_A
         case MONITOR_O2_B1S1
         case MONITOR_O2_B1S2
@@ -445,7 +445,7 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable {
         case MONITOR_PM_FILTER_B2
     }
 
-    public enum Mode9: CaseIterable, Codable, Comparable {
+    public enum Mode9: CaseIterable, Codable, Comparable, Sendable {
         case PIDS_9A
         case VIN_MESSAGE_COUNT
         case VIN

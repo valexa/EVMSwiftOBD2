@@ -81,6 +81,7 @@ class ELM327 {
     private func setupConnectionStateSubscriber() {
         comm.connectionStatePublisher
             .receive(on: DispatchQueue.main)
+            .removeDuplicates()
             .sink { [weak self] state in
                 self?.connectionState = state
                 self?.obdDelegate?.connectionStateChanged(state: state)
