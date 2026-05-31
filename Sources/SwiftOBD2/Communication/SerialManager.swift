@@ -118,6 +118,15 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
             guard let self else { return }
             self.responseContinuation = continuation
             self.writeBytes(command + "\r")
+
+            // 20-second hard deadline per command. handleReceivedData is @MainActor,
+            // so this asyncAfter on main and the receive path cannot race: whichever
+            // fires first nils responseContinuation and the other becomes a no-op.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                guard let self, let cont = self.responseContinuation else { return }
+                self.responseContinuation = nil
+                cont.resume(throwing: CommunicationError.invalidData)
+            }
         }
     }
 

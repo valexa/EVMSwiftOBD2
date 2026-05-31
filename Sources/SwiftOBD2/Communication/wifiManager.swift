@@ -10,23 +10,7 @@ import Foundation
 import Network
 import OSLog
 
-protocol CommProtocol {
-    func sendCommand(_ command: String, retries: Int) async throws -> [String]
-    /// Sends a command that puts the adapter into streaming/monitor mode (e.g. AT MA, AT MT).
-    /// Collects frames for `duration` seconds, then stops and returns them.
-    func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String]
-    func disconnectPeripheral()
-    func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral?) async throws
-    func scanForPeripherals() async throws
-    func reset()
-    var connectionStatePublisher: Published<ConnectionState>.Publisher { get }
-    var obdDelegate: OBDServiceDelegate? { get set }
-}
-
-enum CommunicationError: Error {
-    case invalidData
-    case errorOccurred(Error)
-}
+// CommProtocol and CommunicationError are defined in CommProtocol.swift
 
 class WifiManager: CommProtocol {
     @Published var connectionState: ConnectionState = .disconnected
@@ -81,6 +65,19 @@ class WifiManager: CommProtocol {
             throw CommunicationError.invalidData
         }
         logger.info("Sending: \(command)")
+
+        // ATZ resets the adapter hardware — most WiFi ELM327 adapters drop the TCP
+        // connection immediately after. Fire-and-forget the command, wait for the
+        // reset to complete, then re-establish the TCP connection.
+        if command.uppercased() == "ATZ" {
+            let old = tcp
+            old?.send(content: data, completion: .contentProcessed { _ in })
+            try await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 s for adapter reset
+            old?.cancel()
+            try await connectAsync(timeout: 10, peripheral: nil)
+            return ["ELM327 v2.1"]
+        }
+
         return try await sendCommandInternal(data: data, retries: retries)
     }
 
@@ -111,33 +108,75 @@ class WifiManager: CommProtocol {
 
     private func sendAndReceiveData(_ data: Data) async throws -> String {
         guard let tcpConnection = tcp else {
-             throw CommunicationError.invalidData
-         }
-        let logger = self.logger // Avoid capturing `self` directly
+            throw CommunicationError.invalidData
+        }
+        let logger = self.logger
 
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+        // NWConnection callbacks land outside Swift concurrency, so we gate all
+        // continuation resumes through ResumeOnce to guarantee exactly-one semantics
+        // even when the 15-second timeout and the receive callback race.
+        final class ResumeOnce: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            var continuation: CheckedContinuation<String, Error>?
+            func finish(returning value: String) {
+                lock.lock(); defer { lock.unlock() }
+                guard !done else { return }
+                done = true
+                continuation?.resume(returning: value)
+            }
+            func finish(throwing error: Error) {
+                lock.lock(); defer { lock.unlock() }
+                guard !done else { return }
+                done = true
+                continuation?.resume(throwing: error)
+            }
+        }
+
+        let gate = ResumeOnce()
+
+        return try await withCheckedThrowingContinuation { continuation in
+            gate.continuation = continuation
+
+            // 15-second hard deadline — covers slow protocol auto-detection (SEARCHING...).
+            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+                gate.finish(throwing: CommunicationError.invalidData)
+            }
+
             tcpConnection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
                     logger.error("Error sending data: \(error.localizedDescription)")
-                    continuation.resume(throwing: CommunicationError.errorOccurred(error))
+                    gate.finish(throwing: CommunicationError.errorOccurred(error))
                     return
                 }
 
-                tcpConnection.receive(minimumIncompleteLength: 1, maximumLength: 500) { data, _, _, error in
-                    if let error = error {
-                        logger.error("Error receiving data: \(error.localizedDescription)")
-                        continuation.resume(throwing: CommunicationError.errorOccurred(error))
-                        return
-                    }
+                // Accumulate TCP chunks until the ELM327 '>' prompt is received.
+                // A single receive() call may only return a partial response.
+                var accumulated = ""
 
-                    guard let response = data, let responseString = String(data: response, encoding: .utf8) else {
-                        logger.warning("Received invalid or empty data")
-                        continuation.resume(throwing: CommunicationError.invalidData)
-                        return
-                    }
+                func readNext() {
+                    tcpConnection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { chunk, _, isComplete, error in
+                        if let error = error {
+                            logger.error("Error receiving data: \(error.localizedDescription)")
+                            gate.finish(throwing: accumulated.isEmpty
+                                ? CommunicationError.errorOccurred(error)
+                                : CommunicationError.invalidData)
+                            return
+                        }
 
-                    continuation.resume(returning: responseString)
+                        if let chunk, let str = String(data: chunk, encoding: .utf8) {
+                            accumulated += str
+                        }
+
+                        if accumulated.contains(">") || isComplete {
+                            gate.finish(returning: accumulated)
+                        } else {
+                            readNext()
+                        }
+                    }
                 }
+
+                readNext()
             })
         }
     }
