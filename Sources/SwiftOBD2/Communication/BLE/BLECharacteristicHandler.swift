@@ -82,14 +82,10 @@ class BLECharacteristicHandler {
                 }
 
             case "2AF0": // 18F0 service — read
-                if characteristic.properties.contains(.read) || characteristic.properties.contains(.notify) {
-                    ecuReadCharacteristic = characteristic
-                }
+                ecuReadCharacteristic = characteristic
 
             case "2AF1": // 18F0 service — write
-                if characteristic.properties.contains(.write) {
-                    ecuWriteCharacteristic = characteristic
-                }
+                ecuWriteCharacteristic = characteristic
 
             default:
                 logger.warning("Unknown characteristic: \(uuid) — properties: \(characteristic.properties.rawValue)")
