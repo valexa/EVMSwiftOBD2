@@ -37,21 +37,62 @@ final class MacSerialManager: CommProtocol {
             throw CommunicationError.errorOccurred(err)
         }
 
-        // Try 38400 first (ELM327 default); fall back to 115200 (OBDLink SX/MX/vLinker).
-        // The probe sends ATZ and waits briefly — whichever rate returns data wins.
-        for baud in [B38400, B115200] {
-            if applyBaudRate(speed_t(baud)) {
-                logger.info("Opened \(path) at \(baud == B38400 ? 38400 : 115200) baud (fd=\(self.fileDescriptor))")
-                obdDelegate?.logMessage("Serial: opened \(path) at \(baud == B38400 ? 38400 : 115200) baud")
+        // Probe each baud rate: send '\r', wait 1 s, check if response is valid ASCII.
+        // tcsetattr always succeeds, so we must actually talk to the adapter to confirm.
+        let candidates: [(speed_t, Int)] = [
+            (speed_t(B115200), 115200),
+            (speed_t(B38400),  38400),
+            (speed_t(B57600),  57600),
+            (speed_t(B9600),   9600),
+        ]
+
+        for (baud, rate) in candidates {
+            guard applyBaudRate(baud) else { continue }
+            obdDelegate?.logMessage("Serial: probing \(path) at \(rate) baud…")
+            logger.info("Probing \(path) at \(rate) baud")
+
+            if await probeRespondsValidASCII() {
+                logger.info("Baud rate confirmed: \(rate)")
+                obdDelegate?.logMessage("Serial: \(rate) baud confirmed — adapter responding")
                 connectionState = .connectedToAdapter
                 startReading()
                 return
+            } else {
+                obdDelegate?.logMessage("Serial: no valid response at \(rate) baud")
             }
         }
 
         close(fileDescriptor)
         fileDescriptor = -1
+        obdDelegate?.logMessage("Serial: no baud rate produced a valid response — check cable/adapter")
         throw CommunicationError.invalidData
+    }
+
+    /// Sends a bare '\r' and returns true if the bytes that come back are all printable ASCII.
+    /// Garbage bytes (baud-rate mismatch) contain high-bit or control characters.
+    private func probeRespondsValidASCII() async -> Bool {
+        // Flush any stale bytes before probing.
+        tcflush(fileDescriptor, TCIOFLUSH)
+
+        let cr = [UInt8(0x0D)]  // '\r'
+        _ = cr.withUnsafeBufferPointer { write(fileDescriptor, $0.baseAddress, 1) }
+
+        // Collect bytes for up to 1 second.
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+        let bufSize = 64
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufSize)
+        defer { buf.deallocate() }
+        let n = read(fileDescriptor, buf, bufSize)
+        guard n > 0 else { return false }
+
+        let bytes = UnsafeBufferPointer(start: buf, count: n)
+        let printable = bytes.allSatisfy { b in
+            (b >= 0x20 && b <= 0x7E) || b == 0x0D || b == 0x0A
+        }
+        let preview = String(bytes: bytes, encoding: .ascii) ?? "<non-ASCII>"
+        logger.info("Probe at fd=\(self.fileDescriptor): \(n) bytes, valid=\(printable), preview=\(preview)")
+        return printable
     }
 
     private func applyBaudRate(_ baud: speed_t) -> Bool {
