@@ -293,7 +293,13 @@ class ELM327 {
     // MARK: - Message Sending
 
     func sendCommand(_ message: String, retries: Int = 1) async throws -> [String] {
-        try await comm.sendCommand(message, retries: retries)
+        let result = try await comm.sendCommand(message, retries: retries)
+        if ConfigurationService.shared.obdCommandLogging {
+            let response = result.joined(separator: " | ")
+            logger.info("CMD \(message) → \(response)")
+            obdDelegate?.logMessage("CMD \(message) → \(response)")
+        }
+        return result
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {

@@ -17,6 +17,7 @@ final class MacSerialManager: CommProtocol {
 
     private var readTask: Task<Void, Never>?
     private var responseContinuation: CheckedContinuation<String, Error>?
+    private var responseToken: UUID?
     private var receiveBuffer = ""
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example", category: "MacSerial")
@@ -148,6 +149,7 @@ final class MacSerialManager: CommProtocol {
         readTask = nil
         responseContinuation?.resume(throwing: CommunicationError.invalidData)
         responseContinuation = nil
+        responseToken = nil
         monitorContinuation?.resume(throwing: CommunicationError.invalidData)
         monitorContinuation = nil
         connectionState = .disconnected
@@ -161,23 +163,30 @@ final class MacSerialManager: CommProtocol {
         guard fileDescriptor >= 0 else {
             throw CommunicationError.invalidData
         }
-        logger.info("→ \(command)")
-        obdDelegate?.logMessage("Serial TX: \(command)")
+        if ConfigurationService.shared.serialVerboseLogging {
+            logger.info("→ \(command)")
+            obdDelegate?.logMessage("TX: \(command)")
+        }
 
+        let token = UUID()
         return try await withCheckedThrowingContinuation { [weak self] continuation in
             guard let self = self else { return }
             self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
             self.responseContinuation = continuation
+            self.responseToken = token
             self.receiveBuffer = ""
             self.writeBytes(command + "\r")
 
-            // 20-second per-command deadline — same thread as handleReceivedData (@MainActor)
-            // so whichever fires first nils responseContinuation, the other is a no-op.
+            // 20-second per-command deadline. The token check ensures a stale timeout
+            // from a previous command cannot cancel a later command's continuation.
             DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-                guard let self, let cont = self.responseContinuation else { return }
+                guard let self,
+                      self.responseToken == token,
+                      let cont = self.responseContinuation else { return }
                 self.logger.warning("Timeout waiting for response to: \(command)")
-                self.obdDelegate?.logMessage("Serial: 20s timeout waiting for '\(command)' response — no data received")
+                self.obdDelegate?.logMessage("Serial: 20s timeout waiting for '\(command)' — no data received")
                 self.responseContinuation = nil
+                self.responseToken = nil
                 cont.resume(throwing: CommunicationError.invalidData)
             }
         }
@@ -191,7 +200,7 @@ final class MacSerialManager: CommProtocol {
         }
         if written != bytes.count {
             logger.warning("writeBytes: sent \(written)/\(bytes.count) bytes, errno=\(errno)")
-            obdDelegate?.logMessage("Serial TX warn: wrote \(written)/\(bytes.count) bytes")
+            logger.warning("writeBytes partial: \(written)/\(bytes.count) bytes")
         }
     }
 
@@ -235,8 +244,10 @@ final class MacSerialManager: CommProtocol {
     @MainActor
     private func handleReceivedData(_ chunk: String) {
         let printable = chunk.replacingOccurrences(of: "\r", with: "↵").replacingOccurrences(of: "\n", with: "↵")
-        logger.info("← \(printable)")
-        obdDelegate?.logMessage("Serial RX: \(printable)")
+        if ConfigurationService.shared.serialVerboseLogging {
+            logger.info("← \(printable)")
+            obdDelegate?.logMessage("RX: \(printable)")
+        }
 
         if isMonitoring {
             monitorFrames.append(contentsOf: parseLines(chunk))
@@ -247,6 +258,7 @@ final class MacSerialManager: CommProtocol {
                 receiveBuffer = ""
                 responseContinuation?.resume(returning: raw)
                 responseContinuation = nil
+                responseToken = nil
             }
         }
     }

@@ -54,6 +54,14 @@ public class ConfigurationService: @unchecked Sendable {
         get { UserDefaults.standard.string(forKey: "serialPath") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "serialPath") }
     }
+    public var serialVerboseLogging: Bool {
+        get { UserDefaults.standard.bool(forKey: "serialVerboseLogging") }
+        set { UserDefaults.standard.set(newValue, forKey: "serialVerboseLogging") }
+    }
+    public var obdCommandLogging: Bool {
+        get { UserDefaults.standard.bool(forKey: "obdCommandLogging") }
+        set { UserDefaults.standard.set(newValue, forKey: "obdCommandLogging") }
+    }
 }
 
 /// A class that provides an interface to the ELM327 OBD2 adapter and the vehicle.

@@ -22,6 +22,7 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
     // Single-response path: accumulates bytes until ELM327 ">" prompt
     private var receiveBuffer = ""
     private var responseContinuation: CheckedContinuation<String, Error>?
+    private var responseToken: UUID?
 
     // Monitor-mode path: collects lines for a fixed duration
     private var monitorFrames: [String] = []
@@ -106,6 +107,7 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
         session      = nil
         responseContinuation?.resume(throwing: CommunicationError.invalidData)
         responseContinuation = nil
+        responseToken = nil
         connectionState = .disconnected
     }
 
@@ -117,17 +119,19 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
         guard let output = outputStream, output.streamStatus == .open else {
             throw CommunicationError.invalidData
         }
+        let token = UUID()
         try await withCheckedThrowingContinuation { [weak self] continuation in
             guard let self else { return }
             self.responseContinuation = continuation
+            self.responseToken = token
             self.writeBytes(command + "\r")
 
-            // 20-second hard deadline per command. handleReceivedData is @MainActor,
-            // so this asyncAfter on main and the receive path cannot race: whichever
-            // fires first nils responseContinuation and the other becomes a no-op.
             DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-                guard let self, let cont = self.responseContinuation else { return }
+                guard let self,
+                      self.responseToken == token,
+                      let cont = self.responseContinuation else { return }
                 self.responseContinuation = nil
+                self.responseToken = nil
                 cont.resume(throwing: CommunicationError.invalidData)
             }
         }
@@ -156,6 +160,7 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
             let err = aStream.streamError ?? CommunicationError.invalidData
             responseContinuation?.resume(throwing: CommunicationError.errorOccurred(err))
             responseContinuation = nil
+            responseToken = nil
             monitorContinuation?.resume(returning: monitorFrames)
             monitorContinuation = nil
             connectionState = .disconnected
@@ -181,6 +186,7 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
                 receiveBuffer = ""
                 responseContinuation?.resume(returning: raw)
                 responseContinuation = nil
+                responseToken = nil
             }
         }
     }
