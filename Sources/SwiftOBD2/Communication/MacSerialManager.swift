@@ -1,6 +1,7 @@
 #if os(macOS)
 import Foundation
 import CoreBluetooth
+import OSLog
 
 /// macOS backend for serial OBD adapters (e.g., USB to Serial).
 /// Uses POSIX file descriptors and termios for communication.
@@ -18,41 +19,49 @@ final class MacSerialManager: CommProtocol {
     private var responseContinuation: CheckedContinuation<String, Error>?
     private var receiveBuffer = ""
 
-    func scanForPeripherals() async throws {
-        // Not used, discovery is done via SerialPortDiscovery
-    }
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example", category: "MacSerial")
+
+    func scanForPeripherals() async throws {}
 
     func connectAsync(timeout: TimeInterval, peripheral: CBPeripheral?) async throws {
-        // On macOS, the configuration passes the path via ConfigurationService
-        // Wait, how does the service get the path?
         let path = UserDefaults.standard.string(forKey: "serialPath") ?? ""
         guard !path.isEmpty else {
+            logger.error("No serial path configured")
             throw CommunicationError.invalidData
         }
 
         fileDescriptor = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard fileDescriptor >= 0 else {
-            throw CommunicationError.errorOccurred(NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil))
+            let err = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            logger.error("Failed to open \(path): \(err.localizedDescription)")
+            throw CommunicationError.errorOccurred(err)
         }
 
+        // Try 38400 first (ELM327 default); fall back to 115200 (OBDLink SX/MX/vLinker).
+        // The probe sends ATZ and waits briefly — whichever rate returns data wins.
+        for baud in [B38400, B115200] {
+            if applyBaudRate(speed_t(baud)) {
+                logger.info("Opened \(path) at \(baud == B38400 ? 38400 : 115200) baud (fd=\(self.fileDescriptor))")
+                obdDelegate?.logMessage("Serial: opened \(path) at \(baud == B38400 ? 38400 : 115200) baud")
+                connectionState = .connectedToAdapter
+                startReading()
+                return
+            }
+        }
+
+        close(fileDescriptor)
+        fileDescriptor = -1
+        throw CommunicationError.invalidData
+    }
+
+    private func applyBaudRate(_ baud: speed_t) -> Bool {
         var settings = termios()
-        tcgetattr(fileDescriptor, &settings)
-
+        guard tcgetattr(fileDescriptor, &settings) == 0 else { return false }
         cfmakeraw(&settings)
-        cfsetspeed(&settings, speed_t(B38400)) // Standard ELM327 baud rate
-
-        settings.c_cc.16 = 1 // VMIN
-        settings.c_cc.17 = 1 // VTIME
-
-        let result = tcsetattr(fileDescriptor, TCSANOW, &settings)
-        if result != 0 {
-            close(fileDescriptor)
-            fileDescriptor = -1
-            throw CommunicationError.errorOccurred(NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil))
-        }
-
-        connectionState = .connectedToAdapter
-        startReading()
+        cfsetspeed(&settings, baud)
+        settings.c_cc.16 = 0   // VMIN  — non-blocking read
+        settings.c_cc.17 = 10  // VTIME — 1 second inter-byte timeout
+        return tcsetattr(fileDescriptor, TCSANOW, &settings) == 0
     }
 
     func sendCommand(_ command: String, retries: Int) async throws -> [String] {
@@ -84,7 +93,7 @@ final class MacSerialManager: CommProtocol {
                 let frames = self.monitorFrames
                 self.monitorContinuation?.resume(returning: frames)
                 self.monitorContinuation = nil
-                self.writeBytes("\r") // Interrupt ELM327
+                self.writeBytes("\r")
             }
         }
     }
@@ -108,20 +117,40 @@ final class MacSerialManager: CommProtocol {
     }
 
     private func sendRaw(_ command: String) async throws -> String {
-        try await withCheckedThrowingContinuation { [weak self] continuation in
+        guard fileDescriptor >= 0 else {
+            throw CommunicationError.invalidData
+        }
+        logger.info("→ \(command)")
+        obdDelegate?.logMessage("Serial TX: \(command)")
+
+        return try await withCheckedThrowingContinuation { [weak self] continuation in
             guard let self = self else { return }
             self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
             self.responseContinuation = continuation
             self.receiveBuffer = ""
             self.writeBytes(command + "\r")
+
+            // 20-second per-command deadline — same thread as handleReceivedData (@MainActor)
+            // so whichever fires first nils responseContinuation, the other is a no-op.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                guard let self, let cont = self.responseContinuation else { return }
+                self.logger.warning("Timeout waiting for response to: \(command)")
+                self.obdDelegate?.logMessage("Serial: 20s timeout waiting for '\(command)' response — no data received")
+                self.responseContinuation = nil
+                cont.resume(throwing: CommunicationError.invalidData)
+            }
         }
     }
 
     private func writeBytes(_ string: String) {
         guard fileDescriptor >= 0 else { return }
         let bytes = Array(string.utf8)
-        bytes.withUnsafeBufferPointer { ptr in
-            _ = write(fileDescriptor, ptr.baseAddress, bytes.count)
+        let written = bytes.withUnsafeBufferPointer { ptr in
+            write(fileDescriptor, ptr.baseAddress, bytes.count)
+        }
+        if written != bytes.count {
+            logger.warning("writeBytes: sent \(written)/\(bytes.count) bytes, errno=\(errno)")
+            obdDelegate?.logMessage("Serial TX warn: wrote \(written)/\(bytes.count) bytes")
         }
     }
 
@@ -132,16 +161,26 @@ final class MacSerialManager: CommProtocol {
             defer { buffer.deallocate() }
 
             while let self = self, self.fileDescriptor >= 0, !Task.isCancelled {
-                var readyFileDescriptors = fd_set()
-                readyFileDescriptors.fds_bits.0 = Int32(1 << self.fileDescriptor)
+                // Use select with 100 ms timeout to avoid busy-spin.
+                var fds = fd_set()
+                let fd = self.fileDescriptor
+                // Manually set the bit for this fd in the fd_set.
+                let slot = Int(fd) / 32
+                let bit  = Int(fd) % 32
+                withUnsafeMutableBytes(of: &fds) { ptr in
+                    let words = ptr.bindMemory(to: Int32.self)
+                    if slot < words.count { words[slot] |= Int32(bitPattern: 1 << bit) }
+                }
+                var tv = timeval(tv_sec: 0, tv_usec: 100_000)
+                let ready = select(fd + 1, &fds, nil, nil, &tv)
 
-                var timeout = timeval(tv_sec: 0, tv_usec: 100_000) // 100ms timeout
-                let result = select(self.fileDescriptor + 1, &readyFileDescriptors, nil, nil, &timeout)
-
-                if result > 0 {
-                    let bytesRead = read(self.fileDescriptor, buffer, bufferSize)
+                if ready > 0 {
+                    let bytesRead = read(fd, buffer, bufferSize)
                     if bytesRead > 0 {
-                        let chunk = String(bytes: UnsafeBufferPointer(start: buffer, count: bytesRead), encoding: .ascii) ?? ""
+                        let raw = UnsafeBufferPointer(start: buffer, count: bytesRead)
+                        let chunk = String(bytes: raw, encoding: .ascii)
+                            ?? String(bytes: raw, encoding: .isoLatin1)
+                            ?? "<\(bytesRead) non-ASCII bytes>"
                         await self.handleReceivedData(chunk)
                     } else if bytesRead < 0 && errno != EAGAIN {
                         await self.handleError()
@@ -154,9 +193,12 @@ final class MacSerialManager: CommProtocol {
 
     @MainActor
     private func handleReceivedData(_ chunk: String) {
+        let printable = chunk.replacingOccurrences(of: "\r", with: "↵").replacingOccurrences(of: "\n", with: "↵")
+        logger.info("← \(printable)")
+        obdDelegate?.logMessage("Serial RX: \(printable)")
+
         if isMonitoring {
-            let lines = parseLines(chunk)
-            monitorFrames.append(contentsOf: lines)
+            monitorFrames.append(contentsOf: parseLines(chunk))
         } else {
             receiveBuffer += chunk
             if receiveBuffer.contains(">") {
@@ -170,6 +212,8 @@ final class MacSerialManager: CommProtocol {
 
     @MainActor
     private func handleError() {
+        logger.error("Serial read error, disconnecting")
+        obdDelegate?.logMessage("Serial: read error — disconnecting")
         disconnectPeripheral()
     }
 
