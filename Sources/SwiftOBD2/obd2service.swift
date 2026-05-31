@@ -106,7 +106,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             #if os(iOS)
             elm327 = ELM327(comm: SerialManager())
             #else
-            elm327 = ELM327(comm: MOCKComm())
+            elm327 = ELM327(comm: MacSerialManager())
             #endif
         }
 #endif
@@ -218,7 +218,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             #if os(iOS)
             elm327 = ELM327(comm: SerialManager())
             #else
-            elm327 = ELM327(comm: MOCKComm())
+            elm327 = ELM327(comm: MacSerialManager())
             #endif
         }
         elm327.obdDelegate = self
