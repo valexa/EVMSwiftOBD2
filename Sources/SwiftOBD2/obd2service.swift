@@ -48,6 +48,10 @@ public class ConfigurationService: @unchecked Sendable {
         get { UserDefaults.standard.string(forKey: "wifiPort") ?? "35000" }
         set { UserDefaults.standard.set(newValue, forKey: "wifiPort") }
     }
+    public var serialPath: String {
+        get { UserDefaults.standard.string(forKey: "serialPath") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "serialPath") }
+    }
 }
 
 /// A class that provides an interface to the ELM327 OBD2 adapter and the vehicle.
