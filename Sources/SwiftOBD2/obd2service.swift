@@ -215,6 +215,11 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         elm327.stopConnection()
     }
 
+    /// Switches the dongle to a different CAN protocol without dropping the BT/Serial connection.
+    public func switchProtocol(_ proto: PROTOCOL) async throws {
+        try await elm327.switchProtocol(proto)
+    }
+
     /// Switches the active connection type (between Bluetooth and Wi-Fi).
     ///
     /// - Parameter connectionType: The new desired connection type.

@@ -285,6 +285,14 @@ class ELM327 {
         _ = try await okResponse("AT SH " + header)
     }
 
+    /// Switches the dongle to a different CAN protocol without dropping the BT/Serial connection.
+    /// Sends ATSP<n> and re-asserts ATH1. Bus-specific init commands (ATSH, ATFCSH, etc.)
+    /// are the caller's responsibility — they live in the app layer, not this package.
+    func switchProtocol(_ proto: PROTOCOL) async throws {
+        _ = try await okResponse(proto.cmd)
+        _ = try await okResponse("ATH1")
+    }
+
     func stopConnection() {
         comm.disconnectPeripheral()
         connectionState = .disconnected

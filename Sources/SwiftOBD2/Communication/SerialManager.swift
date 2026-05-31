@@ -120,7 +120,7 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
             throw CommunicationError.invalidData
         }
         let token = UUID()
-        try await withCheckedThrowingContinuation { [weak self] continuation in
+        return try await withCheckedThrowingContinuation { [weak self] continuation in
             guard let self else { return }
             self.responseContinuation = continuation
             self.responseToken = token
