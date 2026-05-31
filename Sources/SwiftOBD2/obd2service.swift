@@ -30,9 +30,9 @@ struct Command: Codable {
     var minValue: Int
 }
 
-public class ConfigurationService {
-    static var shared = ConfigurationService()
-    var connectionType: ConnectionType {
+public class ConfigurationService: @unchecked Sendable {
+    public static let shared = ConfigurationService()
+    public var connectionType: ConnectionType {
         get {
             let rawValue = UserDefaults.standard.string(forKey: "connectionType") ?? "Bluetooth"
             return ConnectionType(rawValue: rawValue) ?? .bluetooth
@@ -40,6 +40,14 @@ public class ConfigurationService {
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "connectionType")
         }
+    }
+    public var wifiHost: String {
+        get { UserDefaults.standard.string(forKey: "wifiHost") ?? "192.168.0.10" }
+        set { UserDefaults.standard.set(newValue, forKey: "wifiHost") }
+    }
+    public var wifiPort: String {
+        get { UserDefaults.standard.string(forKey: "wifiPort") ?? "35000" }
+        set { UserDefaults.standard.set(newValue, forKey: "wifiPort") }
     }
 }
 
@@ -89,7 +97,8 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             let bleManager = BLEManager()
             elm327 = ELM327(comm: bleManager)
         case .wifi:
-            elm327 = ELM327(comm: WifiManager())
+            let config = ConfigurationService.shared
+            elm327 = ELM327(comm: WifiManager(host: config.wifiHost, port: config.wifiPort))
         case .serial:
             #if os(iOS)
             elm327 = ELM327(comm: SerialManager())
@@ -202,7 +211,8 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             let bleManager = BLEManager()
             elm327 = ELM327(comm: bleManager)
         case .wifi:
-            elm327 = ELM327(comm: WifiManager())
+            let config = ConfigurationService.shared
+            elm327 = ELM327(comm: WifiManager(host: config.wifiHost, port: config.wifiPort))
         case .serial:
             #if os(iOS)
             elm327 = ELM327(comm: SerialManager())

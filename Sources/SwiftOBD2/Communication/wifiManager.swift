@@ -39,9 +39,17 @@ class WifiManager: CommProtocol {
 
     var tcp: NWConnection?
 
+    private let hostString: String
+    private let portString: String
+
+    init(host: String = "192.168.0.10", port: String = "35000") {
+        self.hostString = host
+        self.portString = port
+    }
+
     func connectAsync(timeout _: TimeInterval, peripheral _: CBPeripheral? = nil) async throws {
-        let host = NWEndpoint.Host("192.168.0.10")
-        guard let port = NWEndpoint.Port("35000") else {
+        let host = NWEndpoint.Host(hostString)
+        guard let port = NWEndpoint.Port(portString) else {
             throw CommunicationError.invalidData
         }
         tcp = NWConnection(host: host, port: port, using: .tcp)
