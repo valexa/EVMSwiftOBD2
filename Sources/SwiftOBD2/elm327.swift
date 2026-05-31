@@ -141,21 +141,33 @@ class ELM327 {
         logger.info("Starting protocol detection...")
 
         if let protocolToTest = preferredProtocol {
-            logger.info("Attempting preferred protocol: \(protocolToTest.description)")
+            let msg = "Protocol detect: testing preferred \(protocolToTest.description)…"
+            logger.info("\(msg)")
+            obdDelegate?.logMessage(msg)
             if await testProtocol(protocolToTest) {
+                let found = "Protocol found: \(protocolToTest.description)"
+                logger.info("\(found)")
+                obdDelegate?.logMessage(found)
                 return protocolToTest
             } else {
-                logger.warning("Preferred protocol \(protocolToTest.description) failed. Falling back to automatic detection.")
+                let fallback = "Preferred protocol \(protocolToTest.description) failed — falling back to auto-detect"
+                logger.warning("\(fallback)")
+                obdDelegate?.logMessage(fallback)
             }
         } else {
+            obdDelegate?.logMessage("Protocol detect: starting auto-detect (ATSP0 + 0100)…")
             do {
                 return try await detectProtocolAutomatically()
             } catch {
+                let msg = "Auto-detect failed (\(error.localizedDescription)) — trying manual sweep…"
+                logger.warning("\(msg)")
+                obdDelegate?.logMessage(msg)
                 return try await detectProtocolManually()
             }
         }
 
         logger.error("Failed to detect a compatible OBD protocol.")
+        obdDelegate?.logMessage("Protocol detect: no protocol found — giving up")
         throw ELM327Error.noProtocolFound
     }
 
@@ -163,17 +175,30 @@ class ELM327 {
     /// - Returns: The detected protocol, or nil if none could be found.
     /// - Throws: Various setup-related errors.
     private func detectProtocolAutomatically() async throws -> PROTOCOL {
+        obdDelegate?.logMessage("Protocol detect: ATSP0 (auto-search)…")
         _ = try await okResponse("ATSP0")
         try? await Task.sleep(nanoseconds: 1_000_000_000)
-        _ = try await sendCommand("0100")
 
+        obdDelegate?.logMessage("Protocol detect: sending 0100 — waiting for vehicle…")
+        let resp100 = try? await sendCommand("0100")
+        logger.info("0100 raw response: \(String(describing: resp100))")
+        obdDelegate?.logMessage("0100 → \(resp100.map { $0.joined(separator: " ") } ?? "no response")")
+
+        obdDelegate?.logMessage("Protocol detect: querying ATDPN…")
         let obdProtocolNumber = try await sendCommand("ATDPN")
+        logger.info("ATDPN response: \(obdProtocolNumber)")
+        obdDelegate?.logMessage("ATDPN → \(obdProtocolNumber.joined(separator: " "))")
 
         guard let obdProtocol = PROTOCOL(rawValue: String(obdProtocolNumber[0].dropFirst())) else {
-            throw ELM327Error.invalidResponse(message: "Invalid protocol number: \(obdProtocolNumber)")
+            let msg = "Protocol detect: invalid ATDPN value \(obdProtocolNumber)"
+            obdDelegate?.logMessage(msg)
+            throw ELM327Error.invalidResponse(message: msg)
         }
 
-        _ = await testProtocol(obdProtocol)
+        let valid = await testProtocol(obdProtocol)
+        let protocolMsg = "Detected protocol: \(obdProtocol.description) (valid=\(valid))"
+        logger.info("\(protocolMsg)")
+        obdDelegate?.logMessage(protocolMsg)
 
         return obdProtocol
     }
@@ -201,16 +226,18 @@ class ELM327 {
     /// - Parameter obdProtocol: The protocol to test.
     /// - Throws: Various setup-related errors.
     private func testProtocol(_ obdProtocol: PROTOCOL) async -> Bool {
-        // test protocol by sending 0100 and checking for 41 00 response
         let response = try? await sendCommand("0100", retries: 3)
-
-        if let response = response,
-           response.contains(where: { $0.range(of: #"41\s*00"#, options: .regularExpression) != nil }) {
-            logger.info("Protocol \(obdProtocol.description) is valid.")
+        let raw = response?.joined(separator: " ") ?? "no response"
+        if let response, response.contains(where: { $0.range(of: #"41\s*00"#, options: .regularExpression) != nil }) {
+            let msg = "Protocol \(obdProtocol.description) ✓  (0100 → \(raw))"
+            logger.info("\(msg)")
+            obdDelegate?.logMessage(msg)
             r100 = response
             return true
         } else {
-            logger.warning("Protocol \(obdProtocol.rawValue) did not return valid 0100 response.")
+            let msg = "Protocol \(obdProtocol.description) ✗  (0100 → \(raw))"
+            logger.warning("\(msg)")
+            obdDelegate?.logMessage(msg)
             return false
         }
     }
@@ -225,18 +252,31 @@ class ELM327 {
     /// - Parameter setupOrder: A list of commands to send in order.
     /// - Throws: Various setup-related errors.
     func adapterInitialization() async throws {
-        //        [.ATZ, .ATD, .ATL0, .ATE0, .ATH1, .ATAT1, .ATRV, .ATDPN]
         logger.info("Initializing ELM327 adapter...")
+        obdDelegate?.logMessage("Adapter init: sending ATZ (reset)…")
         do {
-            _ = try await sendCommand("ATZ") // Reset adapter
-            _ = try await okResponse("ATE0") // Echo off
-            _ = try await okResponse("ATL0") // Linefeeds off
-            _ = try await okResponse("ATS0") // Spaces off
-            _ = try await okResponse("ATH1") // Headers off
-            _ = try await okResponse("ATSP0") // Set protocol to automatic
+            let atzResp = try await sendCommand("ATZ")
+            logger.info("ATZ response: \(atzResp)")
+            obdDelegate?.logMessage("ATZ → \(atzResp.joined(separator: " | "))")
+
+            obdDelegate?.logMessage("Adapter init: ATE0 (echo off)…")
+            _ = try await okResponse("ATE0")
+            obdDelegate?.logMessage("ATE0 → OK")
+
+            obdDelegate?.logMessage("Adapter init: ATL0 ATH1 ATS0…")
+            _ = try await okResponse("ATL0")
+            _ = try await okResponse("ATS0")
+            _ = try await okResponse("ATH1")
+            obdDelegate?.logMessage("ATL0 / ATS0 / ATH1 → OK")
+
+            obdDelegate?.logMessage("Adapter init: ATSP0 (auto protocol)…")
+            _ = try await okResponse("ATSP0")
+            obdDelegate?.logMessage("ATSP0 → OK — adapter ready")
             logger.info("ELM327 adapter initialized successfully.")
         } catch {
-            logger.error("Adapter initialization failed: \(error.localizedDescription)")
+            let msg = "Adapter init FAILED: \(error.localizedDescription)"
+            logger.error("\(msg)")
+            obdDelegate?.logMessage(msg)
             throw ELM327Error.adapterInitializationFailed
         }
     }

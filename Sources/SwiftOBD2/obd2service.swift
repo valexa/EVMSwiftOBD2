@@ -12,11 +12,13 @@ public protocol OBDServiceDelegate: AnyObject {
     func connectionStateChanged(state: ConnectionState)
     func peripheralsUpdated(_ peripherals: [CBPeripheral])
     func adapterInfoUpdated(_ info: [String: String])
+    func logMessage(_ message: String)
 }
 
 extension OBDServiceDelegate {
     public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {}
     public func adapterInfoUpdated(_ info: [String: String]) {}
+    public func logMessage(_ message: String) {}
 }
 
 struct Command: Codable {
@@ -73,6 +75,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public var onPeripheralsUpdated: (([CBPeripheral]) -> Void)?
     public var onScanningChanged: ((Bool) -> Void)?
     public var onAdapterInfoUpdated: (([String: String]) -> Void)?
+    public var onLog: ((String) -> Void)?
     @Published public var connectionType: ConnectionType {
         didSet {
             switchConnectionType(connectionType)
@@ -137,6 +140,12 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         DispatchQueue.main.async {
             self.adapterInfo = info
             self.onAdapterInfoUpdated?(info)
+        }
+    }
+
+    public func logMessage(_ message: String) {
+        DispatchQueue.main.async {
+            self.onLog?(message)
         }
     }
 

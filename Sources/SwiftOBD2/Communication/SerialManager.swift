@@ -114,6 +114,9 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
     // MARK: - Private
 
     private func sendRaw(_ command: String) async throws -> String {
+        guard let output = outputStream, output.streamStatus == .open else {
+            throw CommunicationError.invalidData
+        }
         try await withCheckedThrowingContinuation { [weak self] continuation in
             guard let self else { return }
             self.responseContinuation = continuation
