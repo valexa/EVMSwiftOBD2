@@ -6,7 +6,6 @@ public enum ConnectionType: String, CaseIterable {
     case bluetooth = "Bluetooth"
     case wifi = "Wi-Fi"
     case serial = "USB Serial"
-    case demo = "Demo"
 }
 
 public protocol OBDServiceDelegate: AnyObject {
@@ -105,8 +104,6 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             #else
             elm327 = ELM327(comm: MOCKComm())
             #endif
-        case .demo:
-            elm327 = ELM327(comm: MOCKComm())
         }
 #endif
         elm327.obdDelegate = self
@@ -219,8 +216,6 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             #else
             elm327 = ELM327(comm: MOCKComm())
             #endif
-        case .demo:
-            elm327 = ELM327(comm: MOCKComm())
         }
         elm327.obdDelegate = self
     }
