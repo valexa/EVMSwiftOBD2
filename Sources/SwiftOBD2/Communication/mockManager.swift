@@ -42,8 +42,8 @@ class MOCKComm: CommProtocol {
                 header = "7E8"
             }
             for i in stride(from: 2, to: command.count, by: 2) {
-                let index = command.index(command.startIndex, offsetBy: i)
-                let nextIndex = command.index(command.startIndex, offsetBy: i + 2)
+                guard let index = command.index(command.startIndex, offsetBy: i, limitedBy: command.endIndex) else { break }
+                let nextIndex = command.index(index, offsetBy: 2, limitedBy: command.endIndex) ?? command.endIndex
                 let subCommand = prefix + String(command[index..<nextIndex])
                 guard let value = OBDCommand.mockResponse(forCommand: subCommand) else {
                     return ["No Data"]
