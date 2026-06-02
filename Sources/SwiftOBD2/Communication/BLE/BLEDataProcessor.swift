@@ -15,7 +15,6 @@ class BLEMessageProcessor {
         buffer.append(data)
 
         guard let string = String(data: buffer, encoding: .utf8) else {
-            // Only clear if buffer is getting too large
             if buffer.count > BLEConstants.maxBufferSize {
                 logger.warning("Buffer exceeded max size, clearing")
                 buffer.removeAll()
@@ -23,7 +22,12 @@ class BLEMessageProcessor {
             return
         }
 
-        // Check for end of response marker
+        // In monitor mode (AT MA) the ELM327 streams frames without a prompt; the adapter
+        // may emit a bare '>' acknowledgment before the stream starts. Triggering completion
+        // on that early '>' stops the monitor before any frames arrive. Let the duration
+        // timeout path collect the full stream instead.
+        if monitorMode { return }
+
         if string.contains(">") {
             let response = parseResponse(from: string)
             handleParsedResponse(response)
