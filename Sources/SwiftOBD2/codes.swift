@@ -14,6 +14,11 @@ public struct TroubleCode: Codable, Hashable, Comparable, Sendable {
 
     public let code: String
     public var description: String
+
+    public init(code: String, description: String) {
+        self.code = code
+        self.description = description
+    }
 }
 
 let codes: [String: String] = [
