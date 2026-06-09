@@ -60,8 +60,6 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     private let peripheralSubject = PassthroughSubject<CBPeripheral, Never>()
     // Replaced with centralized logging - see connectionStateDidChange for usage
 
-    static let RestoreIdentifierKey: String = "OBD2Adapter"
-
     // MARK: Properties
 
     @Published var connectionState: ConnectionState = .disconnected
@@ -99,7 +97,6 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             queue: bleQueue,
             options: [
                 CBCentralManagerOptionShowPowerAlertKey: true,
-                CBCentralManagerOptionRestoreIdentifierKey: BLEManager.RestoreIdentifierKey,
             ]
         )
 
@@ -227,17 +224,6 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             obdInfo("Disconnected from peripheral: \(peripheralName)", category: .bluetooth)
         }
         resetConfigure()
-    }
-
-    func willRestoreState(_: CBCentralManager, dict: [String: Any]) {
-        // Add restored peripherals to the discovered list so they appear in the UI,
-        // but do NOT set them as the managed peripheral — the user decides to connect.
-        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
-            for peripheral in peripherals {
-                obdDebug("Restoring peripheral to scan list: \(peripheral.name ?? "Unnamed")", category: .bluetooth)
-                peripheralScanner.restorePeripheral(peripheral)
-            }
-        }
     }
 
     func connectionEventDidOccur(_: CBCentralManager, event: CBConnectionEvent, peripheral _: CBPeripheral) {
@@ -429,10 +415,6 @@ extension BLEManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         didDisconnect(central, peripheral: peripheral, error: error)
-    }
-
-    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
-        willRestoreState(central, dict: dict)
     }
 }
 

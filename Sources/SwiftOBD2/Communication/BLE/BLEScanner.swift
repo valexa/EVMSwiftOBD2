@@ -72,12 +72,6 @@ class BLEPeripheralScanner: ObservableObject {
         }
     }
 
-    /// Silently adds a peripheral restored from CoreBluetooth state — does not log or publish a scan event.
-    func restorePeripheral(_ peripheral: CBPeripheral) {
-        guard !foundPeripherals.contains(where: { $0.identifier == peripheral.identifier }) else { return }
-        foundPeripherals.append(peripheral)
-    }
-
     func reset() {
         foundPeripherals.removeAll()
         if let completion = foundPeripheralCompletion {
