@@ -6,7 +6,27 @@ import OSLog
 class BLEMessageProcessor {
     private var buffer = Data()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "BLEMessageProcessor")
+    // messageCompletion is set from the waiting task and consumed from either the
+    // BLE queue (response arrived) or the cancellation handler (timeout). Those two
+    // can race; takeCompletion() makes the hand-off atomic so the continuation can
+    // never be resumed twice.
+    private let completionLock = NSLock()
     private var messageCompletion: (([String]?, Error?) -> Void)?
+
+    private func setCompletion(_ completion: @escaping ([String]?, Error?) -> Void) {
+        completionLock.lock()
+        assert(messageCompletion == nil, "Concurrent command detected")
+        messageCompletion = completion
+        completionLock.unlock()
+    }
+
+    private func takeCompletion() -> (([String]?, Error?) -> Void)? {
+        completionLock.lock()
+        defer { completionLock.unlock() }
+        let completion = messageCompletion
+        messageCompletion = nil
+        return completion
+    }
     /// When true, a timeout in waitForResponse returns buffered data instead of throwing.
     /// Used by sendMonitorCommand to capture ELM327 AT MA / AT MT streaming output.
     var monitorMode = false
@@ -48,10 +68,7 @@ class BLEMessageProcessor {
     }
 
     private func handleParsedResponse(_ lines: [String]) {
-       let completion = messageCompletion
-       messageCompletion = nil
-
-       guard let completion = completion else {
+       guard let completion = takeCompletion() else {
            logger.warning("Received response with no pending completion")
            return
        }
@@ -71,8 +88,7 @@ class BLEMessageProcessor {
             return try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
                 try await withTaskCancellationHandler {
                     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
-                        assert(messageCompletion == nil, "Concurrent command detected")
-                        messageCompletion = { response, error in
+                        setCompletion { response, error in
                             if let response = response {
                                 continuation.resume(returning: response)
                             } else if let error = error {
@@ -83,9 +99,7 @@ class BLEMessageProcessor {
                         }
                     }
                 } onCancel: { [self] in
-                    let pending = messageCompletion
-                    messageCompletion = nil
-                    pending?(nil, BLEMessageProcessorError.responseTimeout)
+                    self.takeCompletion()?(nil, BLEMessageProcessorError.responseTimeout)
                 }
             }
         } catch BLEMessageProcessorError.responseTimeout where monitorMode {
@@ -94,7 +108,7 @@ class BLEMessageProcessor {
             monitorMode = false
             let captured = buffer
             buffer.removeAll()
-            messageCompletion = nil
+            _ = takeCompletion()
             guard let string = String(data: captured, encoding: .utf8), !string.isEmpty else { return [] }
             return string
                 .replacingOccurrences(of: ">", with: "")
@@ -106,11 +120,8 @@ class BLEMessageProcessor {
 
     func reset() {
            buffer.removeAll()
-           let completion = messageCompletion
-           messageCompletion = nil
-
            // Call completion with error if it exists
-           completion?(nil, BLEManagerError.peripheralNotConnected)
+           takeCompletion()?(nil, BLEManagerError.peripheralNotConnected)
        }
 }
 

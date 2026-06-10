@@ -170,8 +170,11 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func didDiscover(_: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
         peripheralScanner.addDiscoveredPeripheral(peripheral, advertisementData: advertisementData, rssi: rssi)
+        // Snapshot on the BLE queue (where the scanner mutates the array) so the
+        // main-queue delegate call doesn't read it mid-mutation.
+        let found = peripheralScanner.foundPeripherals
         DispatchQueue.main.async {
-            self.obdDelegate?.peripheralsUpdated(self.peripheralScanner.foundPeripherals)
+            self.obdDelegate?.peripheralsUpdated(found)
         }
     }
 
@@ -258,7 +261,24 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
         connect(to: targetPeripheral)
 
-        try await peripheralManager.waitForCharacteristicsSetup(timeout: timeout)
+        do {
+            try await peripheralManager.waitForCharacteristicsSetup(timeout: timeout)
+        } catch {
+            // CoreBluetooth's connect never times out on its own, so without this the
+            // manager stays .connecting forever and every retry throws
+            // connectionInProgress. Clear peripheral state (which also resumes the
+            // pending setup continuation), cancel the half-open connection, and land
+            // in .error — a recoverable starting point for the next attempt.
+            peripheralManager.reset()
+            centralManager.cancelPeripheralConnection(targetPeripheral)
+            let oldState = connectionState
+            connectionState = .error
+            OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
+            DispatchQueue.main.async {
+                self.obdDelegate?.connectionStateChanged(state: .error)
+            }
+            throw error
+        }
     }
 
     func peripheralManager(_ manager: BLEPeripheralManager, didSetupCharacteristics peripheral: CBPeripheral) {

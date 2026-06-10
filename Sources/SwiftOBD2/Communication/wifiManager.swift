@@ -12,6 +12,46 @@ import OSLog
 
 // CommProtocol and CommunicationError are defined in CommProtocol.swift
 
+// NWConnection callbacks land outside Swift concurrency, so all continuation
+// resumes are gated through ResumeOnce to guarantee exactly-one semantics even
+// when a deadline and a receive callback race. It also owns the lock-protected
+// text buffer those callbacks accumulate into.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    private var buffer = ""
+    var continuation: CheckedContinuation<String, Error>?
+
+    var isDone: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return done
+    }
+
+    func append(_ text: String) {
+        lock.lock(); defer { lock.unlock() }
+        buffer += text
+    }
+
+    var accumulated: String {
+        lock.lock(); defer { lock.unlock() }
+        return buffer
+    }
+
+    func finishWithAccumulated() {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        continuation?.resume(returning: buffer)
+    }
+
+    func finish(throwing error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        continuation?.resume(throwing: error)
+    }
+}
+
 class WifiManager: CommProtocol {
     @Published var connectionState: ConnectionState = .disconnected
 
@@ -82,22 +122,72 @@ class WifiManager: CommProtocol {
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
-        // WiFi uses a single-receive model; attempt a one-shot read with a generous timeout.
-        (try? await sendCommand(command, retries: 0)) ?? []
+        guard let tcpConnection = tcp, let data = "\(command)\r".data(using: .ascii) else {
+            throw CommunicationError.invalidData
+        }
+
+        let gate = ResumeOnce()
+        let raw: String = try await withCheckedThrowingContinuation { continuation in
+            gate.continuation = continuation
+
+            // Monitor mode streams frames with no '>' terminator; the deadline is the
+            // only stop condition. Whatever accumulated by then is the capture.
+            DispatchQueue.global().asyncAfter(deadline: .now() + duration) {
+                gate.finishWithAccumulated()
+            }
+
+            tcpConnection.send(content: data, completion: .contentProcessed { error in
+                if error != nil {
+                    gate.finishWithAccumulated()
+                    return
+                }
+                func readNext() {
+                    tcpConnection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { chunk, _, isComplete, error in
+                        // After the deadline this pending receive doubles as the drain
+                        // for the "STOPPED >" acknowledgment — consume and stop.
+                        if gate.isDone { return }
+                        if let chunk, let str = String(data: chunk, encoding: .utf8) {
+                            gate.append(str)
+                        }
+                        if error != nil || isComplete {
+                            gate.finishWithAccumulated()
+                        } else {
+                            readNext()
+                        }
+                    }
+                }
+                readNext()
+            })
+        }
+
+        // A bare CR stops ELM327 monitor mode; the loop's still-pending receive
+        // drains the resulting "STOPPED >" so it can't corrupt the next command.
+        if let cr = "\r".data(using: .ascii) {
+            tcpConnection.send(content: cr, completion: .contentProcessed { _ in })
+        }
+
+        return raw
+            .replacingOccurrences(of: ">", with: "")
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.uppercased() != "STOPPED" }
     }
 
     private func sendCommandInternal(data: Data, retries: Int) async throws -> [String] {
-        for attempt in 1 ... retries {
+        // Clamp so retries <= 0 still makes one attempt — `1 ... 0` is an invalid
+        // range and traps at runtime.
+        let attempts = max(1, retries)
+        for attempt in 1 ... attempts {
             do {
                 let response = try await sendAndReceiveData(data)
                 if let lines = processResponse(response) {
                     return lines
-                } else if attempt < retries {
-                    logger.info("No data received, retrying attempt \(attempt + 1) of \(retries)...")
-                    try await Task.sleep(nanoseconds: 100_000_000) // 0.5 seconds delay
+                } else if attempt < attempts {
+                    logger.info("No data received, retrying attempt \(attempt + 1) of \(attempts)...")
+                    try await Task.sleep(nanoseconds: 100_000_000) // 0.1 second delay
                 }
             } catch {
-                if attempt == retries {
+                if attempt == attempts {
                     throw error
                 }
                 logger.warning("Attempt \(attempt) failed, retrying: \(error.localizedDescription)")
@@ -111,27 +201,6 @@ class WifiManager: CommProtocol {
             throw CommunicationError.invalidData
         }
         let logger = self.logger
-
-        // NWConnection callbacks land outside Swift concurrency, so we gate all
-        // continuation resumes through ResumeOnce to guarantee exactly-one semantics
-        // even when the 15-second timeout and the receive callback race.
-        final class ResumeOnce: @unchecked Sendable {
-            private let lock = NSLock()
-            private var done = false
-            var continuation: CheckedContinuation<String, Error>?
-            func finish(returning value: String) {
-                lock.lock(); defer { lock.unlock() }
-                guard !done else { return }
-                done = true
-                continuation?.resume(returning: value)
-            }
-            func finish(throwing error: Error) {
-                lock.lock(); defer { lock.unlock() }
-                guard !done else { return }
-                done = true
-                continuation?.resume(throwing: error)
-            }
-        }
 
         let gate = ResumeOnce()
 
@@ -152,24 +221,23 @@ class WifiManager: CommProtocol {
 
                 // Accumulate TCP chunks until the ELM327 '>' prompt is received.
                 // A single receive() call may only return a partial response.
-                var accumulated = ""
-
                 func readNext() {
                     tcpConnection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { chunk, _, isComplete, error in
+                        if gate.isDone { return }
                         if let error = error {
                             logger.error("Error receiving data: \(error.localizedDescription)")
-                            gate.finish(throwing: accumulated.isEmpty
+                            gate.finish(throwing: gate.accumulated.isEmpty
                                 ? CommunicationError.errorOccurred(error)
                                 : CommunicationError.invalidData)
                             return
                         }
 
                         if let chunk, let str = String(data: chunk, encoding: .utf8) {
-                            accumulated += str
+                            gate.append(str)
                         }
 
-                        if accumulated.contains(">") || isComplete {
-                            gate.finish(returning: accumulated)
+                        if gate.accumulated.contains(">") || isComplete {
+                            gate.finishWithAccumulated()
                         } else {
                             readNext()
                         }

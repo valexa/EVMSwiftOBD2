@@ -123,19 +123,26 @@ final class MacSerialManager: CommProtocol {
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
-        isMonitoring = true
-        monitorFrames = []
-
+        // All monitor/continuation state is main-confined (handleReceivedData is
+        // @MainActor and the deadline fires on main), so set it up there too.
         return try await withCheckedThrowingContinuation { continuation in
-            monitorContinuation = continuation
-            writeBytes(command + "\r")
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-                guard let self = self else { return }
-                self.isMonitoring = false
-                let frames = self.monitorFrames
-                self.monitorContinuation?.resume(returning: frames)
-                self.monitorContinuation = nil
-                self.writeBytes("\r")
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: CommunicationError.invalidData)
+                    return
+                }
+                self.isMonitoring = true
+                self.monitorFrames = []
+                self.monitorContinuation = continuation
+                self.writeBytes(command + "\r")
+                DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                    guard let self = self else { return }
+                    self.isMonitoring = false
+                    let frames = self.monitorFrames
+                    self.monitorContinuation?.resume(returning: frames)
+                    self.monitorContinuation = nil
+                    self.writeBytes("\r")
+                }
             }
         }
     }
@@ -147,12 +154,18 @@ final class MacSerialManager: CommProtocol {
         }
         readTask?.cancel()
         readTask = nil
-        responseContinuation?.resume(throwing: CommunicationError.invalidData)
-        responseContinuation = nil
-        responseToken = nil
-        monitorContinuation?.resume(throwing: CommunicationError.invalidData)
-        monitorContinuation = nil
         connectionState = .disconnected
+        // Continuation state is main-confined (sendRaw / timeout / read handler
+        // all run on main); fail any pending waiters there.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
+            self.responseContinuation = nil
+            self.responseToken = nil
+            self.isMonitoring = false
+            self.monitorContinuation?.resume(throwing: CommunicationError.invalidData)
+            self.monitorContinuation = nil
+        }
     }
 
     func reset() {
@@ -169,25 +182,33 @@ final class MacSerialManager: CommProtocol {
         }
 
         let token = UUID()
+        // Continuation state is main-confined: handleReceivedData is @MainActor and
+        // the deadline fires on main, so registration must hop there too — otherwise
+        // setup races an in-flight read of the previous command.
         return try await withCheckedThrowingContinuation { [weak self] continuation in
-            guard let self = self else { return }
-            self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
-            self.responseContinuation = continuation
-            self.responseToken = token
-            self.receiveBuffer = ""
-            self.writeBytes(command + "\r")
+            DispatchQueue.main.async {
+                guard let self else {
+                    continuation.resume(throwing: CommunicationError.invalidData)
+                    return
+                }
+                self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
+                self.responseContinuation = continuation
+                self.responseToken = token
+                self.receiveBuffer = ""
+                self.writeBytes(command + "\r")
 
-            // 20-second per-command deadline. The token check ensures a stale timeout
-            // from a previous command cannot cancel a later command's continuation.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-                guard let self,
-                      self.responseToken == token,
-                      let cont = self.responseContinuation else { return }
-                self.logger.warning("Timeout waiting for response to: \(command)")
-                self.obdDelegate?.logMessage("Serial: 20s timeout waiting for '\(command)' — no data received")
-                self.responseContinuation = nil
-                self.responseToken = nil
-                cont.resume(throwing: CommunicationError.invalidData)
+                // 20-second per-command deadline. The token check ensures a stale timeout
+                // from a previous command cannot cancel a later command's continuation.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                    guard let self,
+                          self.responseToken == token,
+                          let cont = self.responseContinuation else { return }
+                    self.logger.warning("Timeout waiting for response to: \(command)")
+                    self.obdDelegate?.logMessage("Serial: 20s timeout waiting for '\(command)' — no data received")
+                    self.responseContinuation = nil
+                    self.responseToken = nil
+                    cont.resume(throwing: CommunicationError.invalidData)
+                }
             }
         }
     }

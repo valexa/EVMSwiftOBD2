@@ -80,19 +80,26 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
-        monitorFrames  = []
-        monitorEndDate = Date().addingTimeInterval(duration)
-
+        // Continuation state is main-confined: the stream delegate runs on the main
+        // RunLoop and the deadline fires on main, so set up there too.
         return try await withCheckedThrowingContinuation { continuation in
-            monitorContinuation = continuation
-            writeBytes(command + "\r")
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-                guard let self else { return }
-                let frames = self.monitorFrames
-                self.monitorContinuation?.resume(returning: frames)
-                self.monitorContinuation = nil
-                self.monitorEndDate      = nil
-                self.writeBytes("\r")  // interrupt ELM327 monitor mode
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: CommunicationError.invalidData)
+                    return
+                }
+                self.monitorFrames  = []
+                self.monitorEndDate = Date().addingTimeInterval(duration)
+                self.monitorContinuation = continuation
+                self.writeBytes(command + "\r")
+                DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                    guard let self else { return }
+                    let frames = self.monitorFrames
+                    self.monitorContinuation?.resume(returning: frames)
+                    self.monitorContinuation = nil
+                    self.monitorEndDate      = nil
+                    self.writeBytes("\r")  // interrupt ELM327 monitor mode
+                }
             }
         }
     }
@@ -105,10 +112,17 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
         inputStream  = nil
         outputStream = nil
         session      = nil
-        responseContinuation?.resume(throwing: CommunicationError.invalidData)
-        responseContinuation = nil
-        responseToken = nil
         connectionState = .disconnected
+        // Continuation state is main-confined; fail any pending waiters there.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
+            self.responseContinuation = nil
+            self.responseToken = nil
+            self.monitorContinuation?.resume(returning: self.monitorFrames)
+            self.monitorContinuation = nil
+            self.monitorEndDate = nil
+        }
     }
 
     func reset() { disconnectPeripheral() }
@@ -120,19 +134,29 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
             throw CommunicationError.invalidData
         }
         let token = UUID()
+        // Main-confined setup, matching the stream delegate and the deadline. Any
+        // pending continuation from an overlapped call is failed, not silently
+        // dropped — overwriting it would leave that caller suspended forever.
         return try await withCheckedThrowingContinuation { [weak self] continuation in
-            guard let self else { return }
-            self.responseContinuation = continuation
-            self.responseToken = token
-            self.writeBytes(command + "\r")
+            DispatchQueue.main.async {
+                guard let self else {
+                    continuation.resume(throwing: CommunicationError.invalidData)
+                    return
+                }
+                self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
+                self.responseContinuation = continuation
+                self.responseToken = token
+                self.receiveBuffer = ""
+                self.writeBytes(command + "\r")
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-                guard let self,
-                      self.responseToken == token,
-                      let cont = self.responseContinuation else { return }
-                self.responseContinuation = nil
-                self.responseToken = nil
-                cont.resume(throwing: CommunicationError.invalidData)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+                    guard let self,
+                          self.responseToken == token,
+                          let cont = self.responseContinuation else { return }
+                    self.responseContinuation = nil
+                    self.responseToken = nil
+                    cont.resume(throwing: CommunicationError.invalidData)
+                }
             }
         }
     }
@@ -163,6 +187,7 @@ final class SerialManager: NSObject, CommProtocol, StreamDelegate {
             responseToken = nil
             monitorContinuation?.resume(returning: monitorFrames)
             monitorContinuation = nil
+            monitorEndDate = nil
             connectionState = .disconnected
         default:
             break
