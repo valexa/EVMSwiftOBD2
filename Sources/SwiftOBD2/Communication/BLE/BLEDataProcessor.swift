@@ -13,11 +13,20 @@ class BLEMessageProcessor {
     private let completionLock = NSLock()
     private var messageCompletion: (([String]?, Error?) -> Void)?
 
-    private func setCompletion(_ completion: @escaping ([String]?, Error?) -> Void) {
+    /// Atomically claims the completion slot. Returns false (without touching the
+    /// in-flight completion) when a command is already pending, so an overlapping
+    /// command is rejected cleanly instead of clobbering the live continuation —
+    /// the old code asserted here, which crashed debug builds and silently
+    /// orphaned the pending continuation in release.
+    private func setCompletion(_ completion: @escaping ([String]?, Error?) -> Void) -> Bool {
         completionLock.lock()
-        assert(messageCompletion == nil, "Concurrent command detected")
+        defer { completionLock.unlock() }
+        guard messageCompletion == nil else {
+            logger.error("Concurrent command detected — rejecting overlapping BLE command")
+            return false
+        }
         messageCompletion = completion
-        completionLock.unlock()
+        return true
     }
 
     private func takeCompletion() -> (([String]?, Error?) -> Void)? {
@@ -88,7 +97,7 @@ class BLEMessageProcessor {
             return try await withTimeout(seconds: timeout, timeoutError: BLEMessageProcessorError.responseTimeout) { [self] in
                 try await withTaskCancellationHandler {
                     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String], Error>) in
-                        setCompletion { response, error in
+                        let claimed = setCompletion { response, error in
                             if let response = response {
                                 continuation.resume(returning: response)
                             } else if let error = error {
@@ -96,6 +105,12 @@ class BLEMessageProcessor {
                             } else {
                                 continuation.resume(throwing: BLEMessageProcessorError.responseTimeout)
                             }
+                        }
+                        // A command is already pending: don't store this completion
+                        // (that would orphan the live one). Fail this call cleanly
+                        // so the continuation resumes exactly once.
+                        if !claimed {
+                            continuation.resume(throwing: BLEMessageProcessorError.commandInFlight)
                         }
                     }
                 } onCancel: { [self] in
@@ -132,6 +147,7 @@ enum BLEMessageProcessorError: Error, LocalizedError {
     case writeOperationFailed
     case responseTimeout
     case invalidResponseData
+    case commandInFlight
 
     var errorDescription: String? {
         switch self {
@@ -143,6 +159,8 @@ enum BLEMessageProcessorError: Error, LocalizedError {
             return "Timeout waiting for BLE response"
         case .invalidResponseData:
             return "Received invalid response data from BLE device"
+        case .commandInFlight:
+            return "A BLE command is already awaiting a response"
         }
     }
 }
