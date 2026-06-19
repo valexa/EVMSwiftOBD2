@@ -55,6 +55,12 @@ final class MacSerialManager: CommProtocol {
             if await probeRespondsValidASCII() {
                 logger.info("Baud rate confirmed: \(rate)")
                 obdDelegate?.logMessage("Serial: \(rate) baud confirmed — adapter responding")
+                // The probe reads for a fixed 1 s, but a slow adapter can still be
+                // emitting its prompt afterwards. Drop any straggler bytes before
+                // the read loop starts, otherwise they land in the first command's
+                // receive buffer and can swallow / corrupt its response (seen as a
+                // first-connect "Timeout waiting for response to: ATZ").
+                tcflush(fileDescriptor, TCIOFLUSH)
                 connectionState = .connectedToAdapter
                 startReading()
                 return

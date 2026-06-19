@@ -255,7 +255,10 @@ class ELM327 {
         logger.info("Initializing ELM327 adapter...")
         obdDelegate?.logMessage("Adapter init: sending ATZ (reset)…")
         do {
-            let atzResp = try await sendCommand("ATZ")
+            // ATZ is the first command after the port opens and the ELM327 is still
+            // settling, so the very first reset is occasionally lost. Retry it rather
+            // than failing the whole connection on a single dropped frame.
+            let atzResp = try await sendCommand("ATZ", retries: 3)
             logger.info("ATZ response: \(atzResp)")
             obdDelegate?.logMessage("ATZ → \(atzResp.joined(separator: " | "))")
 
