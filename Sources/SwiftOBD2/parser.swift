@@ -47,11 +47,18 @@ public struct CANParser {
             .map { $0.replacingOccurrences(of: " ", with: "") }
             .filter(\.isHex)
 
-        frames = try obdLines.compactMap { try Frame(raw: $0, idBits: idBits) }
+        // Skip individually-malformed frames rather than aborting the whole
+        // response: real adapter output interleaves padding, negative-response
+        // ($7F) and the occasional truncated line, and one bad frame must not
+        // discard every valid ECU reply (which previously surfaced as an empty
+        // "no trouble codes" result). Frame.init still logs each rejection.
+        frames = obdLines.compactMap { try? Frame(raw: $0, idBits: idBits) }
 
         let framesByECU = Dictionary(grouping: frames) { $0.txID }
 
-        messages = try framesByECU.values.compactMap { try Message(frames: $0) }
+        // Likewise tolerate one ECU's frames failing to assemble without losing
+        // the others.
+        messages = framesByECU.values.compactMap { try? Message(frames: $0) }
     }
 }
 
