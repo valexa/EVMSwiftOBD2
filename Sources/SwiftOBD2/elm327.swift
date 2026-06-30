@@ -339,31 +339,68 @@ class ELM327 {
     }
 
     func scanForTroubleCodes() async throws -> [ECUID: [TroubleCode]] {
-        var dtcs: [ECUID: [TroubleCode]] = [:]
         logger.info("Scanning for trouble codes")
-        let dtcCommand = OBDCommand.Mode3.GET_DTC
-        let dtcResponse = try await sendCommand(dtcCommand.properties.command)
+        var dtcs: [ECUID: [TroubleCode]] = [:]
 
-        guard let messages = try canProtocol?.parse(dtcResponse) else {
-            return [:]
+        // Mode $03 — confirmed codes. This is the primary scan; let its errors
+        // propagate so a dropped connection surfaces rather than reading as clean.
+        let confirmed = try await scanDTCs(command: OBDCommand.Mode3.GET_DTC.properties.command,
+                                           status: .confirmed)
+        merge(confirmed, into: &dtcs)
+
+        // Mode $07 (pending) and Mode $0A (permanent) are best-effort: a vehicle
+        // that doesn't support a service answers "NO DATA" or a $7F negative
+        // response, which must not fail the whole scan.
+        if let pending = try? await scanDTCs(command: OBDCommand.Mode7.GET_PENDING_DTC.properties.command,
+                                             status: .pending) {
+            merge(pending, into: &dtcs)
         }
+        if let permanent = try? await scanDTCs(command: OBDCommand.Mode10.GET_PERMANENT_DTC.properties.command,
+                                               status: .permanent) {
+            merge(permanent, into: &dtcs)
+        }
+
+        return dtcs
+    }
+
+    /// Sends a single DTC service command ($03/$07/$0A) and decodes the per-ECU
+    /// codes, tagging each with the originating `status`. The three services
+    /// share the same 2-byte DTC payload, so they all decode via `.dtc`.
+    private func scanDTCs(command: String, status: DTCStatus) async throws -> [ECUID: [TroubleCode]] {
+        let response = try await sendCommand(command)
+        guard let messages = try canProtocol?.parse(response) else { return [:] }
+
+        var result: [ECUID: [TroubleCode]] = [:]
         for message in messages {
-            guard let dtcData = message.data else {
-                continue
-            }
-            let decodedResult = dtcCommand.properties.decode(data: dtcData)
-
-            let ecuId = message.ecu
-            switch decodedResult {
-            case let .success(result):
-                dtcs[ecuId] = result.troubleCode
-
+            guard let data = message.data else { continue }
+            switch OBDCommand.Mode3.GET_DTC.properties.decode(data: data) {
+            case let .success(decoded):
+                let tagged = (decoded.troubleCode ?? []).map {
+                    TroubleCode(code: $0.code, description: $0.description, status: status)
+                }
+                result[message.ecu, default: []].append(contentsOf: tagged)
             case let .failure(error):
                 logger.error("Failed to decode DTC: \(error)")
             }
         }
+        return result
+    }
 
-        return dtcs
+    /// Merges one mode's results into the running set, de-duplicating by code per
+    /// ECU and keeping the highest-priority status (permanent > confirmed >
+    /// pending) when the same code is reported by more than one service.
+    private func merge(_ source: [ECUID: [TroubleCode]], into dest: inout [ECUID: [TroubleCode]]) {
+        for (ecu, codes) in source {
+            for code in codes {
+                if let index = dest[ecu]?.firstIndex(where: { $0.code == code.code }) {
+                    if code.status.priority > dest[ecu]![index].status.priority {
+                        dest[ecu]![index] = code
+                    }
+                } else {
+                    dest[ecu, default: []].append(code)
+                }
+            }
+        }
     }
 
     func scanForUDSDTCs(header: String) async throws -> [TroubleCode] {

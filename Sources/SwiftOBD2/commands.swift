@@ -354,6 +354,28 @@ public enum OBDCommand: Codable, Hashable, Comparable, Identifiable, Sendable {
         }
     }
 
+    public enum Mode7: CaseIterable, Codable, Comparable, Sendable {
+        case GET_PENDING_DTC
+        var properties: CommandProperties {
+            switch self {
+            // Mode $07 — pending DTCs from the current/last drive cycle. Same
+            // 2-byte DTC payload layout as Mode $03, so it reuses `.dtc`.
+            case .GET_PENDING_DTC: return CommandProperties("07", "Get Pending DTCs", 0, .dtc)
+            }
+        }
+    }
+
+    public enum Mode10: CaseIterable, Codable, Comparable, Sendable {
+        case GET_PERMANENT_DTC
+        var properties: CommandProperties {
+            switch self {
+            // Mode $0A — permanent DTCs that survive a fault clear. Same payload
+            // layout as Mode $03.
+            case .GET_PERMANENT_DTC: return CommandProperties("0A", "Get Permanent DTCs", 0, .dtc)
+            }
+        }
+    }
+
     public enum Mode6: CaseIterable, Codable, Comparable, Sendable {
         case MIDS_A
         case MONITOR_O2_B1S1
