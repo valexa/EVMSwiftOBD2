@@ -20,4 +20,8 @@ protocol CommProtocol {
 enum CommunicationError: Error {
     case invalidData
     case errorOccurred(Error)
+    /// The connect attempt exceeded the caller's timeout without reaching `.ready`.
+    case timeout
+    /// The connection was cancelled (e.g. user disconnect or app-side timeout) before it was established.
+    case cancelled
 }

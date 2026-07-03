@@ -52,6 +52,34 @@ private final class ResumeOnce: @unchecked Sendable {
     }
 }
 
+// Void variant of the exactly-once guard, used by connectAsync. The stateUpdateHandler and the
+// timeout deadline resolve on different threads and race to a terminal outcome; whichever arrives
+// first resumes, the loser is a no-op. `finish` returns whether it actually resumed so the timeout
+// can cancel the socket only when it genuinely won the race.
+private final class ConnectOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    var continuation: CheckedContinuation<Void, Error>?
+
+    @discardableResult
+    func finishSuccess() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return false }
+        done = true
+        continuation?.resume(returning: ())
+        return true
+    }
+
+    @discardableResult
+    func finish(throwing error: Error) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return false }
+        done = true
+        continuation?.resume(throwing: error)
+        return true
+    }
+}
+
 class WifiManager: CommProtocol {
     @Published var connectionState: ConnectionState = .disconnected
 
@@ -71,32 +99,54 @@ class WifiManager: CommProtocol {
         self.portString = port
     }
 
-    func connectAsync(timeout _: TimeInterval, peripheral _: CBPeripheral? = nil) async throws {
+    func connectAsync(timeout: TimeInterval, peripheral _: CBPeripheral? = nil) async throws {
         let host = NWEndpoint.Host(hostString)
         guard let port = NWEndpoint.Port(portString) else {
             throw CommunicationError.invalidData
         }
-        tcp = NWConnection(host: host, port: port, using: .tcp)
+        let connection = NWConnection(host: host, port: port, using: .tcp)
+        tcp = connection
+
+        let gate = ConnectOnce()
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            tcp?.stateUpdateHandler = { [weak self] newState in
+            gate.continuation = continuation
+
+            // Honor the caller's timeout. A wrong IP, or a phone that isn't on the adapter's Wi-Fi
+            // network, leaves NWConnection parked in `.waiting` indefinitely — without this deadline
+            // the await never returns and the command gate stays wedged. Cancelling drives the
+            // handler to `.cancelled`; the gate ensures only the race winner resumes.
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak connection] in
+                if gate.finish(throwing: CommunicationError.timeout) {
+                    connection?.cancel()
+                }
+            }
+
+            connection.stateUpdateHandler = { [weak self] newState in
                 guard let self = self else { return }
                 switch newState {
                 case .ready:
                     self.logger.info("Connected to \(host.debugDescription):\(port.debugDescription)")
                     self.connectionState = .connectedToAdapter
-                    continuation.resume(returning: ())
+                    gate.finishSuccess()
                 case let .waiting(error):
+                    // The Local Network permission prompt parks the connection here until the user
+                    // answers, so don't fail fast — the timeout above is the only stop condition.
                     self.logger.warning("Connection waiting: \(error.localizedDescription)")
                 case let .failed(error):
                     self.logger.error("Connection failed: \(error.localizedDescription)")
                     self.connectionState = .disconnected
-                    continuation.resume(throwing: CommunicationError.errorOccurred(error))
+                    gate.finish(throwing: CommunicationError.errorOccurred(error))
+                case .cancelled:
+                    // Reached via disconnectPeripheral() or the app-side timeout cancelling before
+                    // we ever became ready. Resume the waiter so the connect attempt unwinds.
+                    self.connectionState = .disconnected
+                    gate.finish(throwing: CommunicationError.cancelled)
                 default:
                     break
                 }
             }
-            tcp?.start(queue: .main)
+            connection.start(queue: .main)
         }
     }
 
