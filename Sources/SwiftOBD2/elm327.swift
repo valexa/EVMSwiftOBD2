@@ -83,8 +83,9 @@ class ELM327 {
             .receive(on: DispatchQueue.main)
             .removeDuplicates()
             .sink { [weak self] state in
+                // The assignment's didSet already notifies obdDelegate — this
+                // sink is the single delivery channel for transport states.
                 self?.connectionState = state
-                self?.obdDelegate?.connectionStateChanged(state: state)
                 self?.logger.debug("Connection state updated: \(state.description)")
             }
             .store(in: &cancellables)
@@ -246,6 +247,12 @@ class ELM327 {
 
     func connectToAdapter(timeout: TimeInterval, peripheral: CBPeripheral? = nil) async throws {
         try await comm.connectAsync(timeout: timeout, peripheral: peripheral)
+    }
+
+    /// Looks up a previously connected BLE peripheral by system identifier for
+    /// a no-scan pending connect. Nil on non-BLE transports.
+    func retrievePeripheral(withIdentifier identifier: UUID) async -> CBPeripheral? {
+        await comm.retrievePeripheral(withIdentifier: identifier)
     }
 
     /// Initializes the adapter by sending a series of commands.

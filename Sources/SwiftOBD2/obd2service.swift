@@ -129,10 +129,12 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public func connectionStateChanged(state: ConnectionState) {
         DispatchQueue.main.async {
             let oldState = self.connectionState
+            // The transport layers can still deliver the same state twice
+            // (e.g. a manual stop followed by the publisher's .disconnected);
+            // consumers must only see genuine transitions.
+            guard oldState != state else { return }
             self.connectionState = state
-            if oldState != state {
-                OBDLogger.shared.logConnectionChange(from: oldState, to: state)
-            }
+            OBDLogger.shared.logConnectionChange(from: oldState, to: state)
             self.onConnectionStateChanged?(state)
         }
     }
@@ -213,6 +215,15 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     /// Terminates the connection with the OBD2 adapter.
     public func stopConnection() {
         elm327.stopConnection()
+    }
+
+    /// Looks up a previously connected BLE peripheral by its system identifier
+    /// so the caller can start a no-scan pending connect
+    /// (`startConnection(timeout: .infinity, peripheral:)` waits until the
+    /// dongle comes in range). Nil on non-BLE transports or when the system
+    /// no longer knows the identifier.
+    public func retrievePeripheral(identifier: UUID) async -> CBPeripheral? {
+        await elm327.retrievePeripheral(withIdentifier: identifier)
     }
 
     /// Switches the dongle to a different CAN protocol without dropping the BT/Serial connection.

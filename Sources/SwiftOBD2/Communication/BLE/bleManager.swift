@@ -77,7 +77,14 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     private var peripheralScanner: BLEPeripheralScanner!
 
     private var cancellables = Set<AnyCancellable>()
-    
+
+    // The peripheral a centralManager.connect() is in flight for, before
+    // didConnect hands it to peripheralManager. Without it, a disconnect
+    // during the connecting window has nothing to cancel: CoreBluetooth keeps
+    // the attempt alive forever and the state machine stays .connecting,
+    // failing every retry with .connectionInProgress.
+    private var pendingConnectPeripheral: CBPeripheral?
+
     deinit {
         // Clean up resources
         cancellables.removeAll()
@@ -135,8 +142,19 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     }
 
     func disconnectPeripheral() {
-        guard let peripheral = peripheralManager.connectedPeripheral else { return }
-        centralManager.cancelPeripheralConnection(peripheral)
+        stopScan()
+        // Cancel a pending attempt too: during the connecting window the
+        // connected slot is still empty, and skipping the cancel here is what
+        // used to wedge the manager in .connecting after a Stop mid-connect.
+        let target = peripheralManager.connectedPeripheral ?? pendingConnectPeripheral
+        if let target {
+            centralManager.cancelPeripheralConnection(target)
+        }
+        // Cancelling a never-connected attempt produces no didDisconnect
+        // callback, so land the state machine ourselves. resetConfigure also
+        // resumes any scan/characteristics waiters and is idempotent — a real
+        // link's later didDisconnect just runs it again as a no-op.
+        resetConfigure()
     }
 
     // MARK: - Central Manager Delegate Methods
@@ -147,10 +165,10 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             centralManagerDidPowerOn()
         case .poweredOff:
             obdWarning("Bluetooth powered off", category: .bluetooth)
-            peripheralManager.connectedPeripheral = nil
-            let oldState = connectionState
-            connectionState = .disconnected
-            OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
+            // Full teardown, not just dropping the peripheral: resumes any
+            // scan/characteristics waiters and emits .disconnected so the
+            // consumer's disconnect cleanup runs.
+            resetConfigure()
         case .unsupported:
             obdError("Device does not support Bluetooth Low Energy", category: .bluetooth)
         case .unauthorized:
@@ -158,9 +176,9 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         case .resetting:
             obdWarning("Bluetooth is resetting", category: .bluetooth)
         default:
+            // .unknown can fire transiently at startup; setting .error here
+            // would stick (nothing transitions it back) and mask the real state.
             obdError("Bluetooth in unexpected state: \(central.state.rawValue)", category: .bluetooth)
-            connectionState = .error
-            obdDelegate?.connectionStateChanged(state: .error)
         }
     }
 
@@ -185,11 +203,8 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         let oldState = connectionState
         connectionState = .connecting
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-        
-        DispatchQueue.main.async {
-            self.obdDelegate?.connectionStateChanged(state: .connecting)
-        }
-        
+
+        pendingConnectPeripheral = peripheral
         centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
         if centralManager.isScanning {
             centralManager.stopScan()
@@ -198,6 +213,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
     func didConnect(_: CBCentralManager, peripheral: CBPeripheral) {
         obdInfo("Connected to peripheral: \(peripheral.name ?? "Unnamed")", category: .bluetooth)
+        pendingConnectPeripheral = nil
         peripheralManager.setPeripheral(peripheral)
         // Note: connectionState will be set to .connectedToAdapter in peripheralManager delegate
     }
@@ -208,15 +224,12 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         obdError("Connection failed to peripheral: \(peripheralName) - \(errorMsg)", category: .bluetooth)
 
         // Clean up peripheral state so a retry can proceed from a fresh baseline.
+        pendingConnectPeripheral = nil
         peripheralManager.reset()
 
         let oldState = connectionState
         connectionState = .error
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-
-        DispatchQueue.main.async {
-            self.obdDelegate?.connectionStateChanged(state: .error)
-        }
     }
 
     func didDisconnect(_: CBCentralManager, peripheral: CBPeripheral, error: Error?) {
@@ -255,8 +268,21 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         if let peripheral = peripheral {
             targetPeripheral = peripheral
         } else {
+            // Pending-connect mode (timeout: .infinity) requires a known
+            // peripheral — never scan forever.
+            guard timeout.isFinite else {
+                throw BLEManagerError.peripheralNotFound
+            }
             startScanning(BLEPeripheralScanner.supportedServices)
-            targetPeripheral = try await peripheralScanner.waitForFirstPeripheral(timeout: timeout)
+            do {
+                targetPeripheral = try await peripheralScanner.waitForFirstPeripheral(timeout: timeout)
+            } catch {
+                // Without this the radio keeps scanning and the scanner's
+                // waiter slot stays armed after a scan timeout.
+                stopScan()
+                peripheralScanner.reset()
+                throw error
+            }
         }
 
         connect(to: targetPeripheral)
@@ -267,15 +293,19 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             // CoreBluetooth's connect never times out on its own, so without this the
             // manager stays .connecting forever and every retry throws
             // connectionInProgress. Clear peripheral state (which also resumes the
-            // pending setup continuation), cancel the half-open connection, and land
-            // in .error — a recoverable starting point for the next attempt.
+            // pending setup continuation) and cancel the half-open connection.
+            pendingConnectPeripheral = nil
             peripheralManager.reset()
             centralManager.cancelPeripheralConnection(targetPeripheral)
+            // A cancelled attempt (caller tore the task down deliberately) lands
+            // .disconnected; a genuine failure lands .error — both recoverable
+            // starting points. Never stomp a .disconnected another path already
+            // reached (e.g. disconnectPeripheral during this attempt).
             let oldState = connectionState
-            connectionState = .error
-            OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-            DispatchQueue.main.async {
-                self.obdDelegate?.connectionStateChanged(state: .error)
+            let newState: ConnectionState = error is CancellationError ? .disconnected : .error
+            if oldState != .disconnected, oldState != newState {
+                connectionState = newState
+                OBDLogger.shared.logConnectionChange(from: oldState, to: newState)
             }
             throw error
         }
@@ -285,12 +315,6 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         let oldState = connectionState
         connectionState = .connectedToAdapter
         OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
-        
-        // Dispatch delegate call to main queue since it might update UI
-        DispatchQueue.main.async {
-            self.obdDelegate?.connectionStateChanged(state: .connectedToAdapter)
-        }
-        
         obdInfo("Characteristics setup complete, connected to adapter", category: .bluetooth)
     }
 
@@ -380,7 +404,17 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         stopScan()
     }
 
+    /// Looks up a previously connected peripheral by its system identifier so
+    /// the consumer can issue a pending connect without scanning. Returns nil
+    /// when Bluetooth never powers on or the system no longer knows the UUID.
+    func retrievePeripheral(withIdentifier identifier: UUID) async -> CBPeripheral? {
+        // Retrieval before the central reaches .poweredOn always returns [].
+        try? await waitForPoweredOn()
+        return centralManager.retrievePeripherals(withIdentifiers: [identifier]).first
+    }
+
     private func resetConfigure() {
+        pendingConnectPeripheral = nil
         characteristicHandler.reset()
         messageProcessor.reset()
         peripheralManager.reset()
@@ -391,9 +425,6 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         if oldState != connectionState {
             OBDLogger.shared.logConnectionChange(from: oldState, to: connectionState)
             obdDelegate?.peripheralsUpdated([])
-            DispatchQueue.main.async {
-                self.obdDelegate?.connectionStateChanged(state: .disconnected)
-            }
         }
     }
 
@@ -402,11 +433,11 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     /// cancelPeripheralConnection is called with a valid reference, and the
     /// subsequent didDisconnect callback is a safe no-op (all handlers already nil'd).
     public func reset() {
-        let connectedPeripheral = peripheralManager.connectedPeripheral
+        let target = peripheralManager.connectedPeripheral ?? pendingConnectPeripheral
         stopScan()
         resetConfigure()
-        if let connectedPeripheral {
-            centralManager.cancelPeripheralConnection(connectedPeripheral)
+        if let target {
+            centralManager.cancelPeripheralConnection(target)
         }
     }
 }

@@ -13,6 +13,14 @@ protocol CommProtocol {
     func reset()
     var connectionStatePublisher: Published<ConnectionState>.Publisher { get }
     var obdDelegate: OBDServiceDelegate? { get set }
+    /// Looks up a previously connected peripheral by system identifier for a
+    /// no-scan pending connect. Only meaningful for BLE transports.
+    func retrievePeripheral(withIdentifier identifier: UUID) async -> CBPeripheral?
+}
+
+extension CommProtocol {
+    // Non-BLE transports (WiFi, serial, mock) have no peripheral registry.
+    func retrievePeripheral(withIdentifier identifier: UUID) async -> CBPeripheral? { nil }
 }
 
 // MARK: - Transport-layer errors
