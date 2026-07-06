@@ -5,11 +5,20 @@ import Foundation
 public enum ConnectionType: String, CaseIterable {
     case bluetooth = "Bluetooth"
     case wifi = "Wi-Fi"
-    case demo = "Demo"
+    case serial = "USB Serial"
 }
 
 public protocol OBDServiceDelegate: AnyObject {
     func connectionStateChanged(state: ConnectionState)
+    func peripheralsUpdated(_ peripherals: [CBPeripheral])
+    func adapterInfoUpdated(_ info: [String: String])
+    func logMessage(_ message: String)
+}
+
+extension OBDServiceDelegate {
+    public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {}
+    public func adapterInfoUpdated(_ info: [String: String]) {}
+    public func logMessage(_ message: String) {}
 }
 
 struct Command: Codable {
@@ -22,9 +31,9 @@ struct Command: Codable {
     var minValue: Int
 }
 
-public class ConfigurationService {
-    static var shared = ConfigurationService()
-    var connectionType: ConnectionType {
+public class ConfigurationService: @unchecked Sendable {
+    public static let shared = ConfigurationService()
+    public var connectionType: ConnectionType {
         get {
             let rawValue = UserDefaults.standard.string(forKey: "connectionType") ?? "Bluetooth"
             return ConnectionType(rawValue: rawValue) ?? .bluetooth
@@ -32,6 +41,26 @@ public class ConfigurationService {
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: "connectionType")
         }
+    }
+    public var wifiHost: String {
+        get { UserDefaults.standard.string(forKey: "wifiHost") ?? "192.168.0.10" }
+        set { UserDefaults.standard.set(newValue, forKey: "wifiHost") }
+    }
+    public var wifiPort: String {
+        get { UserDefaults.standard.string(forKey: "wifiPort") ?? "35000" }
+        set { UserDefaults.standard.set(newValue, forKey: "wifiPort") }
+    }
+    public var serialPath: String {
+        get { UserDefaults.standard.string(forKey: "serialPath") ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: "serialPath") }
+    }
+    public var serialVerboseLogging: Bool {
+        get { UserDefaults.standard.bool(forKey: "serialVerboseLogging") }
+        set { UserDefaults.standard.set(newValue, forKey: "serialVerboseLogging") }
+    }
+    public var obdCommandLogging: Bool {
+        get { UserDefaults.standard.bool(forKey: "obdCommandLogging") }
+        set { UserDefaults.standard.set(newValue, forKey: "obdCommandLogging") }
     }
 }
 
@@ -42,10 +71,19 @@ public class ConfigurationService {
 ///   - Sending and receiving OBD2 commands.
 ///   - Providing information about the vehicle.
 ///   - Managing the connection state.
-public class OBDService: ObservableObject, OBDServiceDelegate {
+public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendable {
     @Published public private(set) var connectionState: ConnectionState = .disconnected
     @Published public private(set) var isScanning: Bool = false
     @Published public private(set) var connectedPeripheral: CBPeripheral?
+    @Published public private(set) var peripherals: [CBPeripheral] = []
+    @Published public private(set) var adapterInfo: [String: String] = [:]
+
+    // Plain Swift callbacks — consumed by the app layer without Combine.
+    public var onConnectionStateChanged: ((ConnectionState) -> Void)?
+    public var onPeripheralsUpdated: (([CBPeripheral]) -> Void)?
+    public var onScanningChanged: ((Bool) -> Void)?
+    public var onAdapterInfoUpdated: (([String: String]) -> Void)?
+    public var onLog: ((String) -> Void)?
     @Published public var connectionType: ConnectionType {
         didSet {
             switchConnectionType(connectionType)
@@ -73,9 +111,14 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             let bleManager = BLEManager()
             elm327 = ELM327(comm: bleManager)
         case .wifi:
-            elm327 = ELM327(comm: WifiManager())
-        case .demo:
-            elm327 = ELM327(comm: MOCKComm())
+            let config = ConfigurationService.shared
+            elm327 = ELM327(comm: WifiManager(host: config.wifiHost, port: config.wifiPort))
+        case .serial:
+            #if os(iOS)
+            elm327 = ELM327(comm: SerialManager())
+            #else
+            elm327 = ELM327(comm: MacSerialManager())
+            #endif
         }
 #endif
         elm327.obdDelegate = self
@@ -86,10 +129,33 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     public func connectionStateChanged(state: ConnectionState) {
         DispatchQueue.main.async {
             let oldState = self.connectionState
+            // The transport layers can still deliver the same state twice
+            // (e.g. a manual stop followed by the publisher's .disconnected);
+            // consumers must only see genuine transitions.
+            guard oldState != state else { return }
             self.connectionState = state
-            if oldState != state {
-                OBDLogger.shared.logConnectionChange(from: oldState, to: state)
-            }
+            OBDLogger.shared.logConnectionChange(from: oldState, to: state)
+            self.onConnectionStateChanged?(state)
+        }
+    }
+
+    public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {
+        DispatchQueue.main.async {
+            self.peripherals = peripherals
+            self.onPeripheralsUpdated?(peripherals)
+        }
+    }
+
+    public func adapterInfoUpdated(_ info: [String: String]) {
+        DispatchQueue.main.async {
+            self.adapterInfo = info
+            self.onAdapterInfoUpdated?(info)
+        }
+    }
+
+    public func logMessage(_ message: String) {
+        DispatchQueue.main.async {
+            self.onLog?(message)
         }
     }
 
@@ -98,13 +164,13 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     /// - Parameter preferedProtocol: The optional OBD2 protocol to use (if supported).
     /// - Returns: Information about the connected vehicle (`OBDInfo`).
     /// - Throws: Errors that might occur during the connection process.
-    public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7) async throws -> OBDInfo {
+    public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7, peripheral: CBPeripheral? = nil) async throws -> OBDInfo {
         let startTime = CFAbsoluteTimeGetCurrent()
         obdInfo("Starting connection with timeout: \(timeout)s", category: .connection)
-        
+
         do {
             obdDebug("Connecting to adapter...", category: .connection)
-            try await elm327.connectToAdapter(timeout: timeout)
+            try await elm327.connectToAdapter(timeout: timeout, peripheral: peripheral)
             
             obdDebug("Initializing adapter...", category: .connection)
             try await elm327.adapterInitialization()
@@ -121,6 +187,17 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             OBDLogger.shared.logPerformance("Connection failed", duration: duration, success: false)
             obdError("Connection failed: \(error.localizedDescription)", category: .connection)
+            
+            if let bleError = error as? BLEManagerError {
+                if bleError == .peripheralNotFound || bleError == .scanTimeout {
+                    throw OBDServiceError.noAdapterFound
+                }
+            } else if let scanError = error as? BLEScannerError {
+                if scanError == .peripheralNotFound || scanError == .scanTimeout {
+                    throw OBDServiceError.noAdapterFound
+                }
+            }
+            
             throw OBDServiceError.adapterConnectionFailed(underlyingError: error) // Propagate
         }
     }
@@ -140,6 +217,20 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
         elm327.stopConnection()
     }
 
+    /// Looks up a previously connected BLE peripheral by its system identifier
+    /// so the caller can start a no-scan pending connect
+    /// (`startConnection(timeout: .infinity, peripheral:)` waits until the
+    /// dongle comes in range). Nil on non-BLE transports or when the system
+    /// no longer knows the identifier.
+    public func retrievePeripheral(identifier: UUID) async -> CBPeripheral? {
+        await elm327.retrievePeripheral(withIdentifier: identifier)
+    }
+
+    /// Switches the dongle to a different CAN protocol without dropping the BT/Serial connection.
+    public func switchProtocol(_ proto: PROTOCOL) async throws {
+        try await elm327.switchProtocol(proto)
+    }
+
     /// Switches the active connection type (between Bluetooth and Wi-Fi).
     ///
     /// - Parameter connectionType: The new desired connection type.
@@ -154,9 +245,14 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
             let bleManager = BLEManager()
             elm327 = ELM327(comm: bleManager)
         case .wifi:
-            elm327 = ELM327(comm: WifiManager())
-        case .demo:
-            elm327 = ELM327(comm: MOCKComm())
+            let config = ConfigurationService.shared
+            elm327 = ELM327(comm: WifiManager(host: config.wifiHost, port: config.wifiPort))
+        case .serial:
+            #if os(iOS)
+            elm327 = ELM327(comm: SerialManager())
+            #else
+            elm327 = ELM327(comm: MacSerialManager())
+            #endif
         }
         elm327.obdDelegate = self
     }
@@ -254,6 +350,15 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
         }
     }
 
+    /// Scans a specific ECU for DTCs using UDS Service $19 (readDTCByStatusMask).
+    public func scanForUDSDTCs(header: String) async throws -> [TroubleCode] {
+        do {
+            return try await elm327.scanForUDSDTCs(header: header)
+        } catch {
+            throw OBDServiceError.scanFailed(underlyingError: error)
+        }
+    }
+
     /// Clears the trouble codes found on the vehicle.
     ///  - Throws: Errors that might occur during the request process.
     ///     - `OBDServiceError.notConnectedToVehicle` if the adapter is not connected to a vehicle.
@@ -292,6 +397,14 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
         }
     }
 
+    public func sendMonitorCommandInternal(_ command: String, duration: TimeInterval) async throws -> [String] {
+        do {
+            return try await elm327.sendMonitorCommand(command, duration: duration)
+        } catch {
+            throw OBDServiceError.commandFailed(command: command, error: error)
+        }
+    }
+
     public func connectToPeripheral(peripheral: CBPeripheral) async throws {
         do {
             try await elm327.connectToAdapter(timeout: 5, peripheral: peripheral)
@@ -303,9 +416,13 @@ public class OBDService: ObservableObject, OBDServiceDelegate {
     public func scanForPeripherals() async throws {
         do {
             self.isScanning = true
+            onScanningChanged?(true)
             try await elm327.scanForPeripherals()
             self.isScanning = false
+            onScanningChanged?(false)
         } catch {
+            self.isScanning = false
+            onScanningChanged?(false)
             throw OBDServiceError.scanFailed(underlyingError: error)
         }
     }
@@ -416,4 +533,5 @@ public struct VINInfo: Codable, Hashable {
     public let Model: String
     public let ModelYear: String
     public let EngineCylinders: String
+    public let Trim: String?
 }

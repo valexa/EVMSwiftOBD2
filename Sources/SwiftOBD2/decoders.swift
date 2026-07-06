@@ -61,10 +61,22 @@ struct BitArray {
     func value(at range: Range<Int>) -> UInt8 {
         var value: UInt8 = 0
         for bit in range {
+            guard let bitValue = binaryArray[safe: bit] else { return 0 }
             value = value << 1
-            value = value | UInt8(binaryArray[bit])
+            value = value | UInt8(bitValue)
         }
         return value
+    }
+}
+
+extension Collection where Index == Int {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+
+    subscript(safe range: Range<Int>) -> SubSequence? {
+        guard range.lowerBound >= startIndex, range.upperBound <= endIndex else { return nil }
+        return self[range]
     }
 }
 
@@ -90,12 +102,14 @@ class UAS {
     let scale: Double
     var unit: Unit
     let offset: Double
+    let minBytes: Int
 
-    init(signed: Bool, scale: Double, unit: Unit, offset: Double = 0.0) {
+    init(signed: Bool, scale: Double, unit: Unit, offset: Double = 0.0, minBytes: Int = 1) {
         self.signed = signed
         self.scale = scale
         self.unit = unit
         self.offset = offset
+        self.minBytes = minBytes
     }
 
     func decode(bytes: Data, _ unit_: MeasurementUnit = .metric) -> MeasurementResult {
@@ -147,44 +161,46 @@ func twosComp(_ value: Int, length: Int) -> Int {
 
 private var uasIDS: [UInt8: UAS] = {
     return [
-    // Unsigned
+    // Unsigned — 1-byte types (minBytes defaults to 1)
     0x01: UAS(signed: false, scale: 1.0, unit: Unit.count),
     0x02: UAS(signed: false, scale: 0.1, unit: Unit.count),
     0x03: UAS(signed: false, scale: 0.01, unit: Unit.count),
     0x04: UAS(signed: false, scale: 0.001, unit: Unit.count),
     0x05: UAS(signed: false, scale: 0.0000305, unit: Unit.count),
     0x06: UAS(signed: false, scale: 0.000305, unit: Unit.count),
-    0x07: UAS(signed: false, scale: 0.25, unit: Unit.rpm),
-    0x09: UAS(signed: false, scale: 1, unit: UnitSpeed.kilometersPerHour),
+    // Multi-byte types — minBytes: 2 rejects garbage 1-byte default responses (e.g. 0x11)
+    0x07: UAS(signed: false, scale: 0.25, unit: Unit.rpm, minBytes: 2),
+    0x09: UAS(signed: false, scale: 1, unit: UnitSpeed.kilometersPerHour, minBytes: 2),
 
-    0x0A: UAS(signed: false, scale: 0.122, unit: UnitElectricPotentialDifference.millivolts),
-    0x0B: UAS(signed: false, scale: 0.001, unit: UnitElectricPotentialDifference.volts),
+    0x0A: UAS(signed: false, scale: 0.122, unit: UnitElectricPotentialDifference.millivolts, minBytes: 2),
+    0x0B: UAS(signed: false, scale: 0.001, unit: UnitElectricPotentialDifference.volts, minBytes: 2),
 
-    0x10: UAS(signed: false, scale: 1, unit: UnitDuration.milliseconds),
-    0x11: UAS(signed: false, scale: 100, unit: UnitDuration.milliseconds),
-    0x12: UAS(signed: false, scale: 1, unit: UnitDuration.seconds),
-    0x13: UAS(signed: false, scale: 1, unit: UnitElectricResistance.microohms),
-    0x14: UAS(signed: false, scale: 1, unit: UnitElectricResistance.ohms),
-    0x15: UAS(signed: false, scale: 1, unit: UnitElectricResistance.kiloohms),
-    0x16: UAS(signed: false, scale: 0.1, unit: UnitTemperature.celsius, offset: -40.0),
-    0x17: UAS(signed: false, scale: 0.01, unit: UnitPressure.kilopascals),
-    0x18: UAS(signed: false, scale: 0.0117, unit: UnitPressure.kilopascals),
-    0x19: UAS(signed: false, scale: 0.079, unit: UnitPressure.kilopascals),
-    0x1A: UAS(signed: false, scale: 1, unit: UnitPressure.kilopascals),
-    0x1B: UAS(signed: false, scale: 10, unit: UnitPressure.kilopascals),
-    0x1C: UAS(signed: false, scale: 0.01, unit: UnitAngle.degrees),
-    0x1D: UAS(signed: false, scale: 0.5, unit: UnitAngle.degrees),
-    // unit ratio
-    0x1E: UAS(signed: false, scale: 0.0000305, unit: Unit.ratio),
-    0x1F: UAS(signed: false, scale: 0.05, unit: Unit.ratio),
-    0x20: UAS(signed: false, scale: 0.00390625, unit: Unit.ratio),
-    0x21: UAS(signed: false, scale: 1, unit: UnitFrequency.millihertz),
-    0x22: UAS(signed: false, scale: 1, unit: UnitFrequency.hertz),
-    0x23: UAS(signed: false, scale: 1, unit: UnitFrequency.kilohertz),
-    0x24: UAS(signed: false, scale: 1, unit: Unit.count),
-    0x25: UAS(signed: false, scale: 1, unit: UnitLength.kilometers),
+    0x10: UAS(signed: false, scale: 1, unit: UnitDuration.milliseconds, minBytes: 2),
+    0x11: UAS(signed: false, scale: 100, unit: UnitDuration.milliseconds, minBytes: 2),
+    0x12: UAS(signed: false, scale: 1, unit: UnitDuration.seconds, minBytes: 2),
+    0x13: UAS(signed: false, scale: 1, unit: UnitElectricResistance.microohms, minBytes: 2),
+    0x14: UAS(signed: false, scale: 1, unit: UnitElectricResistance.ohms, minBytes: 2),
+    0x15: UAS(signed: false, scale: 1, unit: UnitElectricResistance.kiloohms, minBytes: 2),
+    0x16: UAS(signed: false, scale: 0.1, unit: UnitTemperature.celsius, offset: -40.0, minBytes: 2),
+    0x17: UAS(signed: false, scale: 0.01, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x18: UAS(signed: false, scale: 0.0117, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x19: UAS(signed: false, scale: 0.079, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x1A: UAS(signed: false, scale: 1, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x1B: UAS(signed: false, scale: 10, unit: UnitPressure.kilopascals, minBytes: 2),
+    0x1C: UAS(signed: false, scale: 0.01, unit: UnitAngle.degrees, minBytes: 2),
+    0x1D: UAS(signed: false, scale: 0.5, unit: UnitAngle.degrees, minBytes: 2),
+    // unit ratio — 4-byte lambda/voltage combos
+    0x1E: UAS(signed: false, scale: 0.0000305, unit: Unit.ratio, minBytes: 2),
+    0x1F: UAS(signed: false, scale: 0.05, unit: Unit.ratio, minBytes: 2),
+    0x20: UAS(signed: false, scale: 0.00390625, unit: Unit.ratio, minBytes: 2),
+    0x21: UAS(signed: false, scale: 1, unit: UnitFrequency.millihertz, minBytes: 2),
+    0x22: UAS(signed: false, scale: 1, unit: UnitFrequency.hertz, minBytes: 2),
+    0x23: UAS(signed: false, scale: 1, unit: UnitFrequency.kilohertz, minBytes: 2),
+    0x24: UAS(signed: false, scale: 1, unit: Unit.count, minBytes: 2),
+    0x25: UAS(signed: false, scale: 1, unit: UnitLength.kilometers, minBytes: 2),
 
-    0x27: UAS(signed: false, scale: 0.01, unit: Unit.gramsPerSecond),
+    0x27: UAS(signed: false, scale: 0.01, unit: Unit.gramsPerSecond, minBytes: 2),
+    0x34: UAS(signed: false, scale: 1, unit: UnitDuration.minutes, minBytes: 2),
 
     // Signed
     0x81: UAS(signed: true, scale: 1.0, unit: Unit.count),
@@ -323,6 +339,8 @@ public enum Decoders: Equatable, Encodable {
                 return MonitorDecoder()
             case .encoded_string:
                 return StringDecoder()
+            case .cvn:
+                return CVNDecoder()
             case .uas(let id):
                 let decoder = UASDecoder(id: id)
                 return decoder
@@ -365,10 +383,11 @@ struct MonitorDecoder: Decoder {
     }
 
     func parse_monitor_test(_ data: Data) -> MonitorTest? {
+        let bytes = Array(data)
         var test = MonitorTest()
 
-        let tid = data[1]
-        let cid = data[2]
+        let tid = bytes[1]
+        let cid = bytes[2]
 
         if let testInfo = TestIds[tid] {
             test.name = testInfo.0
@@ -443,27 +462,24 @@ struct AbsEvapPressureDecoder: Decoder {
 
 struct FuelTypeDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 0 else {
+        let bytes = Array(data)
+        guard let i = bytes.first else {
             return .failure(.invalidData)
         }
-        let i = data[0]
-        var value: String?
-        if i < FuelTypes.count {
-            value = FuelTypes[Int(i)]
-        }
-        guard let value = value else {
+        guard let value = FuelTypes[safe: Int(i)] else {
             return .failure(.invalidData)
         }
-        return .success(.stringResult((value)))
+        return .success(.stringResult(value))
     }
 }
 
 struct MaxMafDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 0 else {
+        let bytes = Array(data)
+        guard let first = bytes.first else {
             return .failure(.invalidData)
         }
-        let value = data[0] * 10
+        let value = first * 10
         return .success((.measurementResult(MeasurementResult(value: Double(value), unit: Unit.gramsPerSecond))))
     }
 }
@@ -478,12 +494,13 @@ struct AbsoluteLoadDecoder: Decoder {
 
 struct EvapPressureDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 1 else {
+        let bytes = Array(data)
+        guard bytes.count > 1 else {
             return .failure(.invalidData)
         }
-        
-        let a = twosComp(Int(data[0]), length: 8)
-        let b = twosComp(Int(data[1]), length: 8)
+
+        let a = twosComp(Int(bytes[0]), length: 8)
+        let b = twosComp(Int(bytes[1]), length: 8)
 
         let value = ((Double(a) * 256.0) + Double(b)) / 4.0
         return .success((.measurementResult(MeasurementResult(value: value, unit: UnitPressure.kilopascals))))
@@ -552,11 +569,12 @@ struct O2SensorsAltDecoder: Decoder {
 
 struct OBDComplianceDecoder: Decoder {
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
-        guard data.count > 1 else {
+        let bytes = Array(data)
+        guard bytes.count > 1 else {
             return .failure(.invalidData)
         }
-        
-        let i = data[1]
+
+        let i = bytes[1]
 
         if i < OBD_COMPLIANCE.count {
             return .success(.stringResult((OBD_COMPLIANCE[Int(i)])))
@@ -694,12 +712,26 @@ struct StringDecoder: Decoder {
     }
 }
 
+// Formats the 4-byte Calibration Verification Number as an 8-char uppercase hex string.
+// After sendCommand dropFirst, data layout: [PID(06), count(01), b0, b1, b2, b3]
+struct CVNDecoder: Decoder {
+    func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
+        guard data.count >= 6 else { return .failure(.invalidData) }
+        let cvnBytes = data.dropFirst(2).prefix(4)
+        let hex = cvnBytes.map { String(format: "%02X", $0) }.joined()
+        return .success(.stringResult(hex))
+    }
+}
+
 struct UASDecoder: Decoder {
     let id: UInt8
 
     func decode(data: Data, unit: MeasurementUnit) -> Result<DecodeResult, DecodeError> {
         guard let uas = uasIDS[id] else {
             return .failure(.invalidData)
+        }
+        guard data.count >= uas.minBytes else {
+            return .failure(.noData)
         }
         return .success((.measurementResult(uas.decode(bytes: data, unit))))
     }
@@ -723,11 +755,15 @@ struct StatusDecoder: Decoder {
 
         // convert to binaryarray
         let bits = BitArray(data: data)
+        guard bits.binaryArray.count >= 16 else {
+            return .failure(.invalidData)
+        }
 
         var output = Status()
         output.MIL = bits.binaryArray[0] == 1
         output.dtcCount = bits.value(at: 1 ..< 8)
-        output.ignitionType = IGNITIONTYPE[bits.binaryArray[12]]
+        let ignitionBit = bits.binaryArray[12]
+        output.ignitionType = ignitionBit < IGNITIONTYPE.count ? IGNITIONTYPE[ignitionBit] : "Unknown"
 
         // load the 3 base tests that are always present
 
