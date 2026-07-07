@@ -339,6 +339,37 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         await elm327.getSupportedPIDs()
     }
 
+    /// Mode 02 — the freeze frame: the snapshot of live values the ECU stored at the
+    /// moment an emissions DTC set. It stays stored (frame 00) until codes are cleared,
+    /// so this works for codes already in memory, not just ones that appear while
+    /// connected. Which DTC owns the stored frame is a separate read: Mode 01 PID 02
+    /// (`OBDCommand.Mode1.freezeDTC`).
+    ///
+    /// Request format is `02 <PID> <frame#>`; the response payload is laid out like the
+    /// Mode 01 equivalent with one extra frame-number byte after the PID echo, so each
+    /// PID's own Mode 01 decoder applies to the payload after dropping [PID][frame#].
+    /// PIDs the vehicle didn't capture answer NO DATA and are simply omitted.
+    public func requestFreezeFrame(_ pids: [OBDCommand.Mode1], frame: UInt8 = 0) async -> [OBDCommand.Mode1: MeasurementResult] {
+        var snapshot: [OBDCommand.Mode1: MeasurementResult] = [:]
+        for pid in pids {
+            let mode1Command = OBDCommand.mode1(pid)
+            let pidHex = String(mode1Command.properties.command.dropFirst(2))
+            let command = String(format: "02%@%02X", pidHex, frame)
+            guard let response = try? await elm327.sendCommand(command, retries: 1),
+                  let messages = try? elm327.canProtocol?.parse(response),
+                  let data = (messages.first { $0.ecu == .engine } ?? messages.first)?.data,
+                  data.count > 2
+            else { continue }
+            // message.data has already dropped the mode echo (0x42); what remains is
+            // [PID echo][frame #][payload...] — the Mode 01 decoder wants just payload.
+            if case let .success(decoded) = mode1Command.properties.decode(data: data.dropFirst(2)),
+               let measurement = decoded.measurementResult {
+                snapshot[pid] = measurement
+            }
+        }
+        return snapshot
+    }
+
     ///  Scans for trouble codes and returns the result.
     ///  - Returns: The trouble codes found on the vehicle.
     ///  - Throws: Errors that might occur during the request process.
