@@ -97,7 +97,25 @@ public struct Message: MessageProtocol {
             throw ParserError.error("Failed to parse multi frame message")
         }
         let consecutiveFrames = frames.filter { $0.type == .consecutiveFrame }
+        try validateSequence(consecutiveFrames)
         return try assembleData(firstFrame: firstFrame, consecutiveFrames: consecutiveFrames)
+    }
+
+    /// ISO-TP consecutive frames are numbered 1, 2, 3, … (wrapping 15→0) with no
+    /// gaps. A BLE notification dropped mid-transfer used to go unnoticed here —
+    /// `assembleData` just concatenated whatever frames DID arrive, in receive
+    /// order, silently shifting every byte after the gap. That produces a
+    /// plausible-looking but wrong result (e.g. a bogus trouble code) instead of
+    /// a clean failure. Reject anything but a complete, in-order run.
+    private func validateSequence(_ consecutiveFrames: [Frame]) throws {
+        guard !consecutiveFrames.isEmpty else { return }
+        var expected: UInt8 = 1
+        for frame in consecutiveFrames {
+            guard frame.seqIndex == expected else {
+                throw ParserError.error("Consecutive-frame gap: expected sequence \(expected), got \(frame.seqIndex)")
+            }
+            expected = expected == 15 ? 0 : expected + 1
+        }
     }
 
     private func assembleData(firstFrame: Frame, consecutiveFrames: [Frame]) throws -> Data {
@@ -114,8 +132,12 @@ public struct Message: MessageProtocol {
             throw ParserError.error("Failed to extract data from frame")
         }
         let endIndex = startIndex + Int(frameDataLen) - 1
+        // A short assembly (a trailing consecutive frame never arrived) used to
+        // fall through and return whatever partial bytes were on hand — a
+        // truncated-but-plausible byte string that decoders would happily
+        // misinterpret. Incomplete data must fail, not degrade silently.
         guard endIndex <= frame.data.count else {
-            return frame.data[startIndex...]
+            throw ParserError.error("Incomplete frame: expected \(endIndex) bytes, got \(frame.data.count)")
         }
         return frame.data[startIndex ..< endIndex]
     }
