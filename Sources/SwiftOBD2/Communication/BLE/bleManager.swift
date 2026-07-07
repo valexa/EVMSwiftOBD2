@@ -374,7 +374,14 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
             obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
             return response
         } catch {
-            obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
+            // NO DATA is a routine reply (module asleep, unsupported PID), not a
+            // transport failure — keep it at debug so a parked car polling its
+            // ignition probe doesn't flood the console with error-level lines.
+            if case BLEManagerError.noData = error {
+                obdDebug("No data: \(command)", category: .communication)
+            } else {
+                obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
+            }
             throw error
         }
     }
