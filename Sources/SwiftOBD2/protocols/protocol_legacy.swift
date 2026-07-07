@@ -22,13 +22,21 @@ public struct LegacyParcer {
             .compactMap { $0.replacingOccurrences(of: " ", with: "") }
             .filter(\.isHex)
 
-        frames = try obdLines.compactMap {
-            try LegacyFrame(raw: $0)
+        // `try?`, not `try` — matches the CAN parser's resilience (see its own comment):
+        // one malformed frame from a noisy K-line must not discard every other frame in
+        // the response. This previously aborted the whole parse on a single bad frame.
+        frames = obdLines.compactMap {
+            try? LegacyFrame(raw: $0)
         }
 
-        let framesByECU = Dictionary(grouping: frames) { $0.txID }
-        messages = try framesByECU.values.compactMap {
-            try LegacyMessage(frames: $0)
+        // Group by the raw source-address byte, not `txID` — same reasoning as the CAN
+        // parser (see `CANParser.init`): legacy (ISO 9141-2 / ISO 14230 KWP) source
+        // addresses are manufacturer-assigned per SAE J2178, not constrained to a small
+        // fixed range, so `txID`'s `& 0x07` mask can (in principle, same as the 29-bit CAN
+        // case this session hit on real hardware) collide two distinct ECUs together.
+        let framesByECU = Dictionary(grouping: frames) { $0.rawAddress }
+        messages = framesByECU.values.compactMap {
+            try? LegacyMessage(frames: $0)
         }
     }
 }
@@ -153,6 +161,9 @@ struct LegacyFrame {
     var data = Data()
     var priority: UInt8
     var rxID: UInt8
+    /// The untouched source-address byte — see `Frame.rawAddress` (parser.swift) for why
+    /// this, not `txID`, is what frame grouping actually uses.
+    var rawAddress: UInt8
     var txID: ECUID
 
     init(raw: String) throws {
@@ -161,13 +172,14 @@ struct LegacyFrame {
 
         let dataBytes = rawData.hexBytes
 
-        data = Data(dataBytes.dropFirst(3).dropLast())
         guard dataBytes.count >= 6, dataBytes.count <= 12 else {
             throw ParserError.error("Invalid frame size")
         }
+        data = Data(dataBytes.dropFirst(3).dropLast())
 
         priority = dataBytes[0]
         rxID = dataBytes[1]
+        rawAddress = dataBytes[2]
         txID = ECUID(rawValue: dataBytes[2] & 0x07) ?? .unknown
     }
 }
