@@ -46,6 +46,7 @@ struct LegacyMessage: MessageProtocol {
     public var data: Data?
 
     public var ecu: ECUID
+    public var sourceAddress: UInt8 { frames.first?.rawAddress ?? 0 }
 
     init(frames: [LegacyFrame]) throws {
 //        guard !frames.isEmpty else {
@@ -187,6 +188,29 @@ struct LegacyFrame {
 public protocol MessageProtocol {
     var data: Data? { get }
     var ecu: ECUID { get }
+    /// The untouched source-address byte the responding ECU used. Unlike `ecu` (whose
+    /// `& 0x07`-derived label is only meaningful for 11-bit SAE J1979 addressing and
+    /// degenerates on 29-bit buses, where e.g. 0x10 and 0x18 both label "engine"), this
+    /// stays distinct per module — and on both addressing schemes the PRIMARY engine ECM
+    /// is the numerically lowest responder (0x7E8 on 11-bit, 0x10 on 29-bit per SAE
+    /// J2178), which is what "which ECU's answer is authoritative" decisions key off.
+    var sourceAddress: UInt8 { get }
+}
+
+/// Picks the authoritative response when several ECUs answered one request:
+/// 1. Keep only messages whose first payload byte echoes the requested PID (when given) —
+///    discards a stale/foreign response that happens to share the buffer.
+/// 2. Of those, take the lowest source address — the primary engine ECM on both 11-bit
+///    (0x7E8 < 0x7E9...) and 29-bit (0x10 < 0x18...) addressing.
+/// Deterministic, unlike Dictionary-order `.first`, which on a two-ECU vehicle picked a
+/// different module from one read to the next.
+func preferredECUMessage(_ messages: [MessageProtocol], pidEcho: UInt8? = nil) -> MessageProtocol? {
+    var candidates = messages
+    if let pidEcho {
+        let matching = messages.filter { $0.data?.first == pidEcho }
+        if !matching.isEmpty { candidates = matching }
+    }
+    return candidates.min { $0.sourceAddress < $1.sourceAddress }
 }
 
 class SAE_J1850_PWM: CANProtocol {

@@ -81,6 +81,10 @@ public struct Message: MessageProtocol {
         frames.first?.txID ?? .unknown
     }
 
+    public var sourceAddress: UInt8 {
+        frames.first?.rawAddress ?? 0
+    }
+
     init(frames: [Frame]) throws {
         self.frames = frames
         switch frames.count {

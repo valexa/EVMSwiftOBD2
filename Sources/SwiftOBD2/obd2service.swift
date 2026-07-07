@@ -323,7 +323,15 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public func sendCommand(_ command: OBDCommand) async throws -> Result<DecodeResult, DecodeError> {
         do {
             let response = try await sendCommandInternal(command.properties.command, retries: 3)
-            guard let responseData = try elm327.canProtocol?.parse(response).first?.data else {
+            guard let messages = try elm327.canProtocol?.parse(response), !messages.isEmpty else {
+                return .failure(.noData)
+            }
+            // This is the app's per-PID live-sensor read path — on a two-ECU vehicle the
+            // old Dictionary-order `.first` picked a different module from one poll to
+            // the next, making values flicker between two sources. Prefer the response
+            // that echoes the requested PID, from the primary (lowest-address) ECM.
+            let pidEcho = UInt8(command.properties.command.dropFirst(2).prefix(2), radix: 16)
+            guard let responseData = preferredECUMessage(messages, pidEcho: pidEcho)?.data else {
                 return .failure(.noData)
             }
             return command.properties.decode(data: responseData.dropFirst())
@@ -357,7 +365,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             let command = String(format: "02%@%02X", pidHex, frame)
             guard let response = try? await elm327.sendCommand(command, retries: 1),
                   let messages = try? elm327.canProtocol?.parse(response),
-                  let data = (messages.first { $0.ecu == .engine } ?? messages.first)?.data,
+                  let data = preferredECUMessage(messages, pidEcho: UInt8(pidHex, radix: 16))?.data,
                   data.count > 2
             else { continue }
             // message.data has already dropped the mode echo (0x42); what remains is

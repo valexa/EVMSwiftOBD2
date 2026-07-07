@@ -371,11 +371,11 @@ class ELM327 {
             return .failure(.noData)
         }
         // MIL / DTC count / monitor readiness are a real per-ECU reading, not a bitmap to
-        // union — but `.first` (a Dictionary's iteration order) was non-deterministic
-        // across connects on this vehicle's two-ECU bus. Prefer the engine ECU, which is
-        // authoritative for powertrain MIL status; fall back to whichever answered if this
-        // vehicle's engine controller doesn't tag itself that way.
-        guard let statusData = (messages.first { $0.ecu == .engine } ?? messages.first)?.data else {
+        // union — and `.first` (Dictionary order) was non-deterministic on a two-ECU bus.
+        // `preferredECUMessage` keys off the raw source address (lowest = primary ECM on
+        // both addressing schemes) — the `.ecu == .engine` label used before degenerates
+        // on 29-bit buses, where every module's address masks to the same "engine" label.
+        guard let statusData = preferredECUMessage(messages, pidEcho: 0x01)?.data else {
             return .failure(.noData)
         }
         return statusCommand.properties.decode(data: statusData)
@@ -484,10 +484,10 @@ class ELM327 {
             return nil
         }
 
-        // Same non-deterministic `.first` issue as `getStatus()` — prefer the engine ECU
-        // (the one that actually owns Mode 09 on most vehicles) over Dictionary order.
+        // Same non-deterministic `.first` issue as `getStatus()` — prefer the primary
+        // (lowest-source-address) ECM's answer; the Mode 09 PID echo for VIN is 0x02.
         guard let messages = try? canProtocol?.parse(vinResponse), !messages.isEmpty,
-              let data = (messages.first { $0.ecu == .engine } ?? messages.first)?.data,
+              let data = preferredECUMessage(messages, pidEcho: 0x02)?.data,
               var vinString = String(bytes: data, encoding: .utf8)
         else {
             return nil
