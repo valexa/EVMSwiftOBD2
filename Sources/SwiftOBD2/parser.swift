@@ -54,7 +54,18 @@ public struct CANParser {
         // "no trouble codes" result). Frame.init still logs each rejection.
         frames = obdLines.compactMap { try? Frame(raw: $0, idBits: idBits) }
 
-        let framesByECU = Dictionary(grouping: frames) { $0.txID }
+        // Group by the raw address byte, not `txID` — `txID`'s `& 0x07` mask only means
+        // anything for the 11-bit SAE J1979 functional range (0x7E8-0x7EF, where the low
+        // nibble directly IS the 0-7 ECU index). On a 29-bit bus (ISO 15765-4 29-bit,
+        // protocol 7/9 — common on Chrysler/Jeep/FCA and others), source addresses like
+        // 0x10 and 0x18 both mask to 0 and collapse onto the same `ECUID.engine` bucket:
+        // two physically distinct ECUs' single-frame replies to the same request got
+        // merged into one 2-frame group, which `Message.init` then tried to decode as a
+        // multi-frame ISO-TP sequence instead of two separate single-frame messages —
+        // failing outright (no `.firstFrame` to anchor on) and silently discarding both
+        // ECUs' data. Grouping by the untouched byte keeps distinct addresses distinct
+        // regardless of ID width; `txID` is still computed below for display purposes.
+        let framesByECU = Dictionary(grouping: frames) { $0.rawAddress }
 
         // Likewise tolerate one ECU's frames failing to assemble without losing
         // the others.
@@ -149,6 +160,10 @@ struct Frame {
     var priority: UInt8
     var addrMode: UInt8
     var rxID: UInt8
+    /// The untouched source-address byte (`dataBytes[3]`) — used to group frames by ECU.
+    /// Unlike `txID`, this stays distinct across every possible address regardless of
+    /// ID width, which is what frame reassembly actually depends on being correct.
+    var rawAddress: UInt8
     var txID: ECUID
     var type: FrameType
     var seqIndex: UInt8 = 0 // Only used when type = CF
@@ -180,6 +195,7 @@ struct Frame {
         priority = dataBytes[2] & 0x0F
         addrMode = dataBytes[3] & 0xF0
         rxID = dataBytes[2]
+        rawAddress = dataBytes[3]
         txID = ECUID(rawValue: dataBytes[3] & 0x07) ?? .unknown
         self.type = type
 
