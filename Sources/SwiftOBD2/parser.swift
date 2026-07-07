@@ -100,7 +100,15 @@ public struct Message: MessageProtocol {
         else { // Pre-validate the length
             throw ParserError.error("Frame validation failed")
         }
-        return frame.data.dropFirst(2)
+        // The PCI length nibble counts [mode-echo byte + real payload] and says nothing
+        // about what follows — a CAN frame shorter than 8 bytes gets padded (ISO 15765-2
+        // specifies 0xCC, though 0xAA/0x55 are common in practice), and this used to
+        // return everything after the mode echo, padding included. Harmless for
+        // fixed-offset PID decoders (they only ever read the bytes they need), but
+        // DTCDecoder walks the ENTIRE length in 2-byte strides — non-zero padding bytes
+        // there decode as a phantom trouble code that has nothing to do with the vehicle.
+        let payloadLength = Int(dataLen) - 1
+        return frame.data.dropFirst(2).prefix(payloadLength)
     }
 
     private func parseMultiFrameMessage(_ frames: [Frame]) throws -> Data {
