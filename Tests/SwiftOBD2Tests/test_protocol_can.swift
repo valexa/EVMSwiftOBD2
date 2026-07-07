@@ -39,4 +39,35 @@ final class test_protocol_can: XCTestCase {
             // to long
         }
     }
+
+    /// Real capture from a 2016 Jeep Cherokee KL (protocol 7, ISO 15765-4 29-bit):
+    /// two ECUs (source addresses 0x10 and 0x18) each answering 0100 with a single
+    /// frame. Regression-locks two bugs at once: 29-bit frames being fed through the
+    /// 11-bit "00000" padding path (odd-length hex → every byte boundary shifted →
+    /// every frame rejected by the size guard → zero data from the whole vehicle),
+    /// and distinct ECUs collapsing into one group via the `& 0x07` txID mask
+    /// (0x10 and 0x18 both mask to 0), which merged their single-frame replies into
+    /// a bogus multi-frame group that failed to assemble.
+    func test_29bit_two_ecus() {
+        for canprotocol in CAN_29_PROTOCOLS {
+            let messages = (try? canprotocol.parse([
+                "18DAF11806410098180001AA",
+                "18DAF110064100983B201300",
+            ])) ?? []
+            XCTAssertEqual(messages.count, 2, "each 29-bit ECU must produce its own message")
+
+            // Single-frame extraction drops the PCI byte and the mode echo (0x41) but
+            // keeps trailing CAN padding — same convention the 11-bit test above locks in.
+            let payloads = Set(messages.compactMap { $0.data.map { Data($0) } })
+            XCTAssertEqual(payloads, [
+                Data([0x00, 0x98, 0x18, 0x00, 0x01, 0xAA]),
+                Data([0x00, 0x98, 0x3B, 0x20, 0x13, 0x00]),
+            ])
+        }
+    }
 }
+
+let CAN_29_PROTOCOLS: [CANProtocol] = [
+    ISO_15765_4_29bit_500k(),
+    ISO_15765_4_29bit_250k(),
+]
