@@ -204,12 +204,26 @@ class ELM327 {
         return obdProtocol
     }
 
+    /// CAN first: the overwhelming majority of vehicles on the road (MY2008+ in the US,
+    /// mid-2000s+ in the EU) use one of the four ISO 15765-4 variants, so probing legacy
+    /// protocols ahead of them — the previous order, `PROTOCOL.allCases` in declaration
+    /// order — spent up to 5 full round-trips (ATSPn + 0100 + timeout each) on protocols
+    /// that were never going to answer before ever reaching the one that would. Legacy
+    /// (pre-CAN) protocols come next, then J1939/user-defined CAN last since they're both
+    /// rare for a consumer passenger vehicle. Only reached at all when the ELM327's own
+    /// ATSP0 auto-search (`detectProtocolAutomatically`) already failed.
+    private static let manualSweepOrder: [PROTOCOL] = [
+        .protocol6, .protocol7, .protocol8, .protocol9,
+        .protocol1, .protocol2, .protocol3, .protocol4, .protocol5,
+        .protocolA, .protocolB, .protocolC,
+    ]
+
     /// Attempts to detect the OBD protocol manually.
     /// - Parameter desiredProtocol: An optional preferred protocol to attempt first.
     /// - Returns: The detected protocol, or nil if none could be found.
     /// - Throws: Various setup-related errors.
     private func detectProtocolManually() async throws -> PROTOCOL {
-        for protocolOption in PROTOCOL.allCases where protocolOption != .NONE {
+        for protocolOption in Self.manualSweepOrder {
             self.logger.info("Testing protocol: \(protocolOption.description)")
             _ = try await okResponse(protocolOption.cmd)
             if await testProtocol(protocolOption) {
