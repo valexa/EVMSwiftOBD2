@@ -631,9 +631,12 @@ extension OBDCommand.Mode1 {
         case .ambientAirTemp: return CommandProperties("0146", "Ambient air temperature", 4, .temp, true)
         case .throttlePosB: return CommandProperties("0147", "Absolute throttle position B", 4, .percent, true)
         case .throttlePosC: return CommandProperties("0148", "Absolute throttle position C", 4, .percent, true)
-        case .throttlePosD: return CommandProperties("0149", "Absolute throttle position D", 4, .percent, true)
-        case .throttlePosE: return CommandProperties("014A", "Absolute throttle position E", 4, .percent, true)
-        case .throttlePosF: return CommandProperties("014B", "Absolute throttle position F", 4, .percent, true)
+        // PIDs 49-4B are the accelerator PEDAL sensor (SAE J1979 calls them exactly that) —
+        // a different physical sensor from the throttle PLATE position (0111/0147/0148).
+        // Same 0-100% linear encoding, so the decoded value was never wrong, only the label.
+        case .throttlePosD: return CommandProperties("0149", "Accelerator pedal position D", 4, .percent, true)
+        case .throttlePosE: return CommandProperties("014A", "Accelerator pedal position E", 4, .percent, true)
+        case .throttlePosF: return CommandProperties("014B", "Accelerator pedal position F", 4, .percent, true)
         case .throttleActuator: return CommandProperties("014C", "Commanded throttle actuator", 4, .percent, true)
         case .runTimeMIL: return CommandProperties("014D", "Time run with MIL on", 4, .uas(0x34), true)
         case .timeSinceDTCCleared: return CommandProperties("014E", "Time since trouble codes cleared", 4, .uas(0x34), true)

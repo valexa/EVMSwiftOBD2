@@ -279,6 +279,20 @@ class ELM327 {
             _ = try await okResponse("ATH1")
             obdDelegate?.logMessage("ATL0 / ATS0 / ATH1 → OK")
 
+            // Best-effort, not `okResponse`: both are v1.3+/v2.x features that a cheap or
+            // older clone may not implement, and an unrecognized command ("?") must not
+            // abort the whole connection over what's an optional reliability improvement.
+            // ATAT1 (adaptive timing) is Elm Electronics' own recommendation for noisy
+            // links — it grows the per-command timeout based on observed bus response
+            // time instead of a fixed one, exactly the failure mode this session kept
+            // chasing on both adapters. ATCAF1 (CAN auto-formatting) makes explicit an
+            // assumption every parser in this package already makes implicitly: that the
+            // adapter — not us — strips CAN padding/PCI framing before handing us lines.
+            obdDelegate?.logMessage("Adapter init: ATAT1 (adaptive timing) / ATCAF1 (CAN auto-format)…")
+            let atatResp = try? await sendCommand("ATAT1")
+            let atcafResp = try? await sendCommand("ATCAF1")
+            obdDelegate?.logMessage("ATAT1 → \(atatResp?.joined(separator: " | ") ?? "no response (unsupported?)"), ATCAF1 → \(atcafResp?.joined(separator: " | ") ?? "no response (unsupported?)")")
+
             obdDelegate?.logMessage("Adapter init: ATSP0 (auto protocol)…")
             _ = try await okResponse("ATSP0")
             obdDelegate?.logMessage("ATSP0 → OK — adapter ready")

@@ -105,9 +105,14 @@ struct LegacyMessage: MessageProtocol {
             //  sort the frames by the order byte
             let sortedFrames = frames.sorted { $0.data[2] < $1.data[2] }
 
-            // check contiguity
-            guard sortedFrames.first?.data[2] == 1 else {
-                throw ParserError.error("Invalid order byte")
+            // Check the sequence is complete, not just that it starts at 1 — the same class
+            // of gap the CAN parser used to miss (see parser.swift's validateSequence): a
+            // dropped frame here left `sortedFrames` short but still "starting at 1", so this
+            // used to accumulate a truncated response instead of failing it outright.
+            for (index, frame) in sortedFrames.enumerated() {
+                guard frame.data[2] == index + 1 else {
+                    throw ParserError.error("Order-byte gap: expected \(index + 1), got \(frame.data[2])")
+                }
             }
 
             // now that they're in order, accumulate the data from each frame
