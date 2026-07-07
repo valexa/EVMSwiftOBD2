@@ -360,7 +360,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     ///     `BLEManagerError.peripheralNotConnected` if the peripheral is not connected.
     ///     `BLEManagerError.timeout` if the operation times out.
     ///     `BLEManagerError.unknownError` if an unknown error occurs.
-    func sendCommand(_ command: String, retries _: Int = 3) async throws -> [String] {
+    func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
         guard let peripheral = peripheralManager.connectedPeripheral else {
             obdError("Missing peripheral or ECU characteristic", category: .bluetooth)
             throw BLEManagerError.missingPeripheralOrCharacteristic
@@ -368,15 +368,38 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
         obdDebug("Sending command: \(command)", category: .communication)
 
-        do {
-            try characteristicHandler.writeCommand(command, to: peripheral)
-            let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
-            obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
-            return response
-        } catch {
-            obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
-            throw error
+        // The `retries` parameter used to be declared and silently ignored (`retries _:`),
+        // making every BLE command a single 3-second attempt. Two real consequences:
+        // one dropped BLE notification failed the whole read instead of re-asking, and
+        // K-line protocol detection (ISO 9141 / KWP 5-baud init takes 5-10 s inside the
+        // ELM327 while it prints "SEARCHING...") could never fit one 3 s window — the
+        // WiFi transport honors retries, so the same vehicle behaved differently per
+        // transport. Re-sending the same command after a timeout is safe: the pending
+        // completion was already taken by the timeout path, and a late reply to attempt
+        // N carries the same payload attempt N+1 is waiting for.
+        let attempts = max(1, retries)
+        var lastError: Error?
+        for attempt in 1 ... attempts {
+            do {
+                try characteristicHandler.writeCommand(command, to: peripheral)
+                let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
+                obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
+                return response
+            } catch BLEManagerError.noData {
+                // "NO DATA" is the adapter's well-formed answer ("the vehicle didn't
+                // respond to this request"), not a comm failure — re-asking an
+                // unsupported PID 3 times would just burn the polling cycle's budget.
+                throw BLEManagerError.noData
+            } catch {
+                lastError = error
+                obdWarning("Command \(command) attempt \(attempt)/\(attempts) failed: \(error.localizedDescription)", category: .communication)
+                if attempt < attempts {
+                    try? await Task.sleep(nanoseconds: 150_000_000) // let the adapter settle before re-sending
+                }
+            }
         }
+        obdError("Command failed after \(attempts) attempts: \(command)", category: .communication)
+        throw lastError ?? BLEManagerError.timeout
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
