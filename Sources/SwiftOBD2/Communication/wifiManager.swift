@@ -301,15 +301,23 @@ class WifiManager: CommProtocol {
 
     private func processResponse(_ response: String) -> [String]? {
         logger.info("Processing response: \(response)")
-        var lines = response.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        // Strip the '>' prompt character itself rather than dropping whichever line
+        // contains it: some WiFi ELM327 clones append the prompt directly onto the
+        // last data line with no preceding newline (e.g. "43 00 00 00 00 00 00>" as
+        // one line). The previous `lines.last?.contains(">") → removeLast()` logic
+        // discarded that entire line — including real trouble-code/measurement
+        // bytes — whenever the adapter happened to frame it that way. Also trim
+        // each line before the "no data" check: an untrimmed trailing \r made
+        // "no data\r" fail to match "no data" and read as a real (garbage) line.
+        let lines = response
+            .replacingOccurrences(of: ">", with: "")
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         guard !lines.isEmpty else {
             logger.warning("Empty response lines")
             return nil
-        }
-
-        if lines.last?.contains(">") == true {
-            lines.removeLast()
         }
 
         if lines.first?.lowercased() == "no data" {

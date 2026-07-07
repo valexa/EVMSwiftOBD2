@@ -490,6 +490,29 @@ public enum OBDServiceError: Error {
     case commandFailed(command: String, error: Error)
 }
 
+extension OBDServiceError: LocalizedError {
+    // Without this, every consumer's `.localizedDescription` produced the useless generic
+    // "OBDServiceError error N." — every case here wraps a real underlying transport/parse
+    // error (BLEManagerError, ELM327Error, ParserError, ...) that already describes itself
+    // properly; this was the one place in the chain that discarded it.
+    public var errorDescription: String? {
+        switch self {
+        case .noAdapterFound:
+            return "No OBD adapter found."
+        case .notConnectedToVehicle:
+            return "Connected to the adapter, but not to the vehicle."
+        case .adapterConnectionFailed(let underlying):
+            return "Adapter connection failed: \(underlying.localizedDescription)"
+        case .scanFailed(let underlying):
+            return "Trouble-code scan failed: \(underlying.localizedDescription)"
+        case .clearFailed(let underlying):
+            return "Clearing trouble codes failed: \(underlying.localizedDescription)"
+        case .commandFailed(let command, let underlying):
+            return "Command '\(command)' failed: \(underlying.localizedDescription)"
+        }
+    }
+}
+
 public struct MeasurementResult: Equatable {
     public var value: Double
     public let unit: Unit

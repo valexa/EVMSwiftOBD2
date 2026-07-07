@@ -559,12 +559,23 @@ extension ELM327 {
         return Array(Set(supportedPIDs))
     }
 
+    /// Unions the supported-PID bitmap across every ECU that answered, instead of trusting
+    /// only the first one. On a vehicle with more than one ECU on the bus (e.g. a separate
+    /// module handling body/transmission PIDs), `.first` silently discarded any PID that only
+    /// the *other* ECU advertised — and since `.first` here comes from a `Dictionary`'s
+    /// iteration order, which ECU "won" wasn't even guaranteed to be the same one from one
+    /// connection to the next, so the set of sensors that showed up could vary connect to
+    /// connect on the exact same vehicle.
     private func parseResponse(_ response: [String]) -> Set<String>? {
-        guard let ecuData = try? canProtocol?.parse(response).first?.data else {
+        guard let messages = try? canProtocol?.parse(response), !messages.isEmpty else {
             return nil
         }
-        let binaryData = BitArray(data: ecuData.dropFirst()).binaryArray
-        return extractSupportedPIDs(binaryData)
+        var combined = Set<String>()
+        for message in messages {
+            guard let data = message.data else { continue }
+            combined.formUnion(extractSupportedPIDs(BitArray(data: data.dropFirst()).binaryArray))
+        }
+        return combined.isEmpty ? nil : combined
     }
 
     func extractSupportedPIDs(_ binaryData: [Int]) -> Set<String> {

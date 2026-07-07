@@ -25,11 +25,20 @@ extension CommProtocol {
 
 // MARK: - Transport-layer errors
 
-enum CommunicationError: Error {
+enum CommunicationError: Error, LocalizedError {
     case invalidData
     case errorOccurred(Error)
     /// The connect attempt exceeded the caller's timeout without reaching `.ready`.
     case timeout
     /// The connection was cancelled (e.g. user disconnect or app-side timeout) before it was established.
     case cancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidData: return "Invalid data received from the adapter."
+        case .errorOccurred(let underlying): return underlying.localizedDescription
+        case .timeout: return "The connection attempt timed out."
+        case .cancelled: return "The connection attempt was cancelled."
+        }
+    }
 }

@@ -469,7 +469,7 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 }
 
-enum BLEManagerError: Error, CustomStringConvertible {
+enum BLEManagerError: Error, CustomStringConvertible, LocalizedError {
     case missingPeripheralOrCharacteristic
     case unknownCharacteristic
     case scanTimeout
@@ -520,4 +520,9 @@ enum BLEManagerError: Error, CustomStringConvertible {
             return "Error: Connection already active or in progress. Please disconnect before attempting a new connection."
         }
     }
+
+    // `CustomStringConvertible.description` alone isn't picked up by `Error.localizedDescription` —
+    // without this, every one of the messages above was unreachable through normal error handling
+    // and callers saw the generic "BLEManagerError error N." instead.
+    public var errorDescription: String? { description }
 }

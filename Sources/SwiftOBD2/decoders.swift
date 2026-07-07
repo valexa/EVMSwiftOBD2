@@ -233,11 +233,20 @@ private var uasIDS: [UInt8: UAS] = {
     0xFE: UAS(signed: true, scale: 0.25, unit: Unit.Pascal)
 ]}()
 
-public enum DecodeError: Error {
+public enum DecodeError: Error, LocalizedError {
     case invalidData
     case noData
     case decodingFailed(reason: String)
     case unsupportedDecoder
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidData: return "Invalid data received for decoding."
+        case .noData: return "No data received."
+        case .decodingFailed(let reason): return "Decoding failed: \(reason)"
+        case .unsupportedDecoder: return "No decoder available for this command."
+        }
+    }
 }
 
 protocol Decoder {
