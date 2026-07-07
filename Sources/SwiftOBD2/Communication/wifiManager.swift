@@ -286,8 +286,15 @@ class WifiManager: CommProtocol {
                             gate.append(str)
                         }
 
-                        if gate.accumulated.contains(">") || isComplete {
+                        if gate.accumulated.contains(">") {
                             gate.finishWithAccumulated()
+                        } else if isComplete {
+                            // `isComplete` here means the TCP stream reached EOF — the
+                            // adapter (or the WiFi link) closed the connection before ever
+                            // sending the closing prompt. Treating this as success used to
+                            // hand whatever partial bytes arrived to the parser as if they
+                            // were a complete, well-formed response.
+                            gate.finish(throwing: CommunicationError.connectionClosed)
                         } else {
                             readNext()
                         }

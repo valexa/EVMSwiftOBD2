@@ -102,6 +102,14 @@ struct LegacyMessage: MessageProtocol {
             ///       |  [         ] [         ] [         ]
             ///   order byte is removed
 
+            // `LegacyFrame.init` only requires 2 bytes of payload after stripping the
+            // header/checksum, but every access below assumes at least 3 (the order byte
+            // at index 2) — a short/truncated frame (plausible on a noisy K-line) must
+            // throw here, not crash on an out-of-bounds subscript.
+            guard frames.allSatisfy({ $0.data.count >= 3 }) else {
+                throw ParserError.error("Frame too short to carry an order byte")
+            }
+
             //  sort the frames by the order byte
             let sortedFrames = frames.sorted { $0.data[2] < $1.data[2] }
 

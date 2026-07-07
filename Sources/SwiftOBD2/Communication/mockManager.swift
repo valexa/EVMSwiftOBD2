@@ -68,7 +68,14 @@ class MOCKComm: CommProtocol {
                 Totallength += ffLength
 
                 var cf = Array(chunks.dropFirst())
-                Totallength += cf.joined().replacingOccurrences(of: " ", with: "").count
+                // Same hex-chars → bytes conversion as `ffLength` above (÷2) — this was
+                // adding raw hex-character count instead of byte count, roughly doubling
+                // the declared ISO-TP length. Harmless while `parser.swift`'s multi-frame
+                // assembly silently accepted a short/mismatched length, but this session's
+                // stricter bounds check there (`extractDataFromFrame` now throws instead of
+                // truncating) turned that inflated length into every multi-PID mock
+                // response failing to decode in the Simulator.
+                Totallength += cf.joined().replacingOccurrences(of: " ", with: "").count / 2
 
                 var lengthHex = String(format: "%02X", Totallength - 1)
 

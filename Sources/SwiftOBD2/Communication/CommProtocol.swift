@@ -32,6 +32,10 @@ enum CommunicationError: Error, LocalizedError {
     case timeout
     /// The connection was cancelled (e.g. user disconnect or app-side timeout) before it was established.
     case cancelled
+    /// The TCP connection reached EOF mid-response — the peer closed the socket before
+    /// sending the ELM327 '>' prompt, so whatever bytes arrived are a truncated fragment,
+    /// not a complete reply.
+    case connectionClosed
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +43,7 @@ enum CommunicationError: Error, LocalizedError {
         case .errorOccurred(let underlying): return underlying.localizedDescription
         case .timeout: return "The connection attempt timed out."
         case .cancelled: return "The connection attempt was cancelled."
+        case .connectionClosed: return "The connection closed before the adapter finished responding."
         }
     }
 }

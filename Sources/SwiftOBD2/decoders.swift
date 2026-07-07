@@ -174,8 +174,14 @@ class UAS {
 }
 
 func twosComp(_ value: Int, length: Int) -> Int {
+    // `value` always arrives already masked to `length` bits (from `bytesToInt`, which
+    // only ever returns 0...2^length-1), so `value & mask` was a pure no-op — this could
+    // never actually produce a negative number. The top half of the range must fold back
+    // negative: e.g. for an 8-bit value, 0x80...0xFF (128...255) means -128...-1.
     let mask = (1 << length) - 1
-    return value & mask
+    let masked = value & mask
+    let signBit = 1 << (length - 1)
+    return masked >= signBit ? masked - (1 << length) : masked
 }
 
 private var uasIDS: [UInt8: UAS] = {

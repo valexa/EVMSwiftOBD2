@@ -367,7 +367,15 @@ class ELM327 {
         let statusCommand = OBDCommand.Mode1.status
         let statusResponse = try await sendCommand(statusCommand.properties.command)
         logger.debug("Status response: \(statusResponse)")
-        guard let statusData = try canProtocol?.parse(statusResponse).first?.data else {
+        guard let messages = try canProtocol?.parse(statusResponse), !messages.isEmpty else {
+            return .failure(.noData)
+        }
+        // MIL / DTC count / monitor readiness are a real per-ECU reading, not a bitmap to
+        // union — but `.first` (a Dictionary's iteration order) was non-deterministic
+        // across connects on this vehicle's two-ECU bus. Prefer the engine ECU, which is
+        // authoritative for powertrain MIL status; fall back to whichever answered if this
+        // vehicle's engine controller doesn't tag itself that way.
+        guard let statusData = (messages.first { $0.ecu == .engine } ?? messages.first)?.data else {
             return .failure(.noData)
         }
         return statusCommand.properties.decode(data: statusData)
@@ -476,7 +484,10 @@ class ELM327 {
             return nil
         }
 
-        guard let data = try? canProtocol?.parse(vinResponse).first?.data,
+        // Same non-deterministic `.first` issue as `getStatus()` — prefer the engine ECU
+        // (the one that actually owns Mode 09 on most vehicles) over Dictionary order.
+        guard let messages = try? canProtocol?.parse(vinResponse), !messages.isEmpty,
+              let data = (messages.first { $0.ecu == .engine } ?? messages.first)?.data,
               var vinString = String(bytes: data, encoding: .utf8)
         else {
             return nil
@@ -567,7 +578,16 @@ extension ELM327 {
                 // Ex.
                 //        || ||
                 // 7E8 06 41 00 BE 7F B8 13
-                guard let supportedPidsByECU = parseResponse(response) else {
+                //
+                // Each getter's bitmap only covers ITS OWN 32-PID block (0100→01-20,
+                // 0120→21-40, 0140→41-60, ...) — the block base must be added to the bit
+                // index, or every getter after the first reports its bits as PIDs 01-20
+                // again. That silently capped every vehicle's live-sensor list at the
+                // first 32 standard PIDs regardless of what the ECU actually supports —
+                // anything from 0x21 up (fuel level, ambient temp, control module voltage,
+                // fuel type, fuel rate, ...) could never be recognized as supported.
+                let baseOffset = UInt8(pidGetter.properties.command.dropFirst(2), radix: 16) ?? 0
+                guard let supportedPidsByECU = parseResponse(response, baseOffset: baseOffset) else {
                     continue
                 }
 
@@ -594,24 +614,27 @@ extension ELM327 {
     /// iteration order, which ECU "won" wasn't even guaranteed to be the same one from one
     /// connection to the next, so the set of sensors that showed up could vary connect to
     /// connect on the exact same vehicle.
-    private func parseResponse(_ response: [String]) -> Set<String>? {
+    private func parseResponse(_ response: [String], baseOffset: UInt8 = 0) -> Set<String>? {
         guard let messages = try? canProtocol?.parse(response), !messages.isEmpty else {
             return nil
         }
         var combined = Set<String>()
         for message in messages {
             guard let data = message.data else { continue }
-            combined.formUnion(extractSupportedPIDs(BitArray(data: data.dropFirst()).binaryArray))
+            combined.formUnion(extractSupportedPIDs(BitArray(data: data.dropFirst()).binaryArray, baseOffset: baseOffset))
         }
         return combined.isEmpty ? nil : combined
     }
 
-    func extractSupportedPIDs(_ binaryData: [Int]) -> Set<String> {
+    /// `baseOffset` is the PID number the response's bit 0 represents (0 for 0100's
+    /// PIDs 01-20, 0x20 for 0120's PIDs 21-40, etc.) — defaults to 0 so existing callers
+    /// (and the `0100`-only unit test) are unaffected.
+    func extractSupportedPIDs(_ binaryData: [Int], baseOffset: UInt8 = 0) -> Set<String> {
         var supportedPIDs: Set<String> = []
 
         for (index, value) in binaryData.enumerated() {
             if value == 1 {
-                let pid = String(format: "%02X", index + 1)
+                let pid = String(format: "%02X", Int(baseOffset) + index + 1)
                 supportedPIDs.insert(pid)
             }
         }
