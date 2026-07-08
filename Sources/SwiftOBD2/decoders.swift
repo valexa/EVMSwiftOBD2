@@ -17,19 +17,38 @@ public enum MeasurementUnit: String, Codable {
 }
 
 public struct Status: Codable, Hashable {
-    var MIL: Bool = false
+    // Only `dtcCount` was public before — MIL (the check-engine light itself) and the
+    // per-monitor readiness fields were unreachable from outside this module despite
+    // `Status` being public, silently blocking any consumer from building a "check
+    // engine / inspection readiness" feature on top of PID 0101.
+    public var MIL: Bool = false
     public var dtcCount: UInt8 = 0
-    var ignitionType: String = ""
+    public var ignitionType: String = ""
 
-    var misfireMonitoring = StatusTest()
-    var fuelSystemMonitoring = StatusTest()
-    var componentMonitoring = StatusTest()
+    public var misfireMonitoring = StatusTest()
+    public var fuelSystemMonitoring = StatusTest()
+    public var componentMonitoring = StatusTest()
+
+    // Bytes C (availability) and D (completion) of PID 0101 — 8 more monitors that were
+    // never decoded at all (the old decoder only looked at bytes A/B). Field names use
+    // spark-ignition (gasoline) semantics per SAE J1979 since that covers the vast
+    // majority of consumer vehicles; on a compression-ignition (diesel) vehicle the same
+    // 8 bit slots carry different real-world meaning (the consuming app relabels using
+    // `ignitionType` — see `OBDReadinessStatus` in HiAuto).
+    public var catalystMonitoring = StatusTest()
+    public var heatedCatalystMonitoring = StatusTest()
+    public var evapSystemMonitoring = StatusTest()
+    public var secondaryAirSystemMonitoring = StatusTest()
+    public var auxInputMonitoring = StatusTest() // gasoline particulate filter, on GPF-equipped vehicles
+    public var oxygenSensorMonitoring = StatusTest()
+    public var oxygenSensorHeaterMonitoring = StatusTest()
+    public var egrOrVvtMonitoring = StatusTest()
 }
 
-struct StatusTest: Codable, Hashable {
-    var name: String = ""
-    var supported: Bool = false
-    var ready: Bool = false
+public struct StatusTest: Codable, Hashable {
+    public var name: String = ""
+    public var supported: Bool = false
+    public var ready: Bool = false
 
     init(_ name: String = "", _ supported: Bool = false, _ ready: Bool = false) {
         self.name = name
@@ -155,8 +174,14 @@ class UAS {
 }
 
 func twosComp(_ value: Int, length: Int) -> Int {
+    // `value` always arrives already masked to `length` bits (from `bytesToInt`, which
+    // only ever returns 0...2^length-1), so `value & mask` was a pure no-op — this could
+    // never actually produce a negative number. The top half of the range must fold back
+    // negative: e.g. for an 8-bit value, 0x80...0xFF (128...255) means -128...-1.
     let mask = (1 << length) - 1
-    return value & mask
+    let masked = value & mask
+    let signBit = 1 << (length - 1)
+    return masked >= signBit ? masked - (1 << length) : masked
 }
 
 private var uasIDS: [UInt8: UAS] = {
@@ -229,11 +254,20 @@ private var uasIDS: [UInt8: UAS] = {
     0xFE: UAS(signed: true, scale: 0.25, unit: Unit.Pascal)
 ]}()
 
-public enum DecodeError: Error {
+public enum DecodeError: Error, LocalizedError {
     case invalidData
     case noData
     case decodingFailed(reason: String)
     case unsupportedDecoder
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidData: return "Invalid data received for decoding."
+        case .noData: return "No data received."
+        case .decodingFailed(let reason): return "Decoding failed: \(reason)"
+        case .unsupportedDecoder: return "No decoder available for this command."
+        }
+    }
 }
 
 protocol Decoder {
@@ -770,6 +804,14 @@ struct StatusDecoder: Decoder {
         for (index, name) in baseTests.reversed().enumerated() {
             processBaseTest(name, index, bits, &output)
         }
+
+        // Bytes C/D — only when the response actually carries all 4 bytes (it always
+        // should per spec, but a non-compliant adapter/ECU truncating the reply must not
+        // crash on an out-of-bounds bit index).
+        if bits.binaryArray.count >= 32 {
+            decodeNonContinuousTests(bits, &output)
+        }
+
         return .success(.statusResult(output))
     }
 
@@ -785,6 +827,23 @@ struct StatusDecoder: Decoder {
         default:
             break
         }
+    }
+
+    /// Byte C (bits 16...23, C7 first) = availability, 1 = available. Byte D (bits
+    /// 24...31, D7 first) = completion, 0 = complete — same polarity as the 3 base tests
+    /// above, just at a different bit offset.
+    private func decodeNonContinuousTests(_ bits: BitArray, _ output: inout Status) {
+        func test(availBit: Int, completeBit: Int) -> StatusTest {
+            StatusTest("", bits.binaryArray[availBit] != 0, bits.binaryArray[completeBit] == 0)
+        }
+        output.catalystMonitoring = test(availBit: 23, completeBit: 31)           // C0 / D0
+        output.heatedCatalystMonitoring = test(availBit: 22, completeBit: 30)     // C1 / D1
+        output.evapSystemMonitoring = test(availBit: 21, completeBit: 29)         // C2 / D2
+        output.secondaryAirSystemMonitoring = test(availBit: 20, completeBit: 28) // C3 / D3
+        output.auxInputMonitoring = test(availBit: 19, completeBit: 27)           // C4 / D4
+        output.oxygenSensorMonitoring = test(availBit: 18, completeBit: 26)       // C5 / D5
+        output.oxygenSensorHeaterMonitoring = test(availBit: 17, completeBit: 25) // C6 / D6
+        output.egrOrVvtMonitoring = test(availBit: 16, completeBit: 24)           // C7 / D7
     }
 }
 

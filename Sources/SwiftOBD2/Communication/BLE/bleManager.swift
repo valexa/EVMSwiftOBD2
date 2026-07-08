@@ -360,7 +360,7 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     ///     `BLEManagerError.peripheralNotConnected` if the peripheral is not connected.
     ///     `BLEManagerError.timeout` if the operation times out.
     ///     `BLEManagerError.unknownError` if an unknown error occurs.
-    func sendCommand(_ command: String, retries _: Int = 3) async throws -> [String] {
+    func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
         guard let peripheral = peripheralManager.connectedPeripheral else {
             obdError("Missing peripheral or ECU characteristic", category: .bluetooth)
             throw BLEManagerError.missingPeripheralOrCharacteristic
@@ -368,22 +368,41 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
 
         obdDebug("Sending command: \(command)", category: .communication)
 
-        do {
-            try characteristicHandler.writeCommand(command, to: peripheral)
-            let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
-            obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
-            return response
-        } catch {
-            // NO DATA is a routine reply (module asleep, unsupported PID), not a
-            // transport failure — keep it at debug so a parked car polling its
-            // ignition probe doesn't flood the console with error-level lines.
-            if case BLEManagerError.noData = error {
+        // The `retries` parameter used to be declared and silently ignored (`retries _:`),
+        // making every BLE command a single 3-second attempt. Two real consequences:
+        // one dropped BLE notification failed the whole read instead of re-asking, and
+        // K-line protocol detection (ISO 9141 / KWP 5-baud init takes 5-10 s inside the
+        // ELM327 while it prints "SEARCHING...") could never fit one 3 s window — the
+        // WiFi transport honors retries, so the same vehicle behaved differently per
+        // transport. Re-sending the same command after a timeout is safe: the pending
+        // completion was already taken by the timeout path, and a late reply to attempt
+        // N carries the same payload attempt N+1 is waiting for.
+        let attempts = max(1, retries)
+        var lastError: Error?
+        for attempt in 1 ... attempts {
+            do {
+                try characteristicHandler.writeCommand(command, to: peripheral)
+                let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
+                obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
+                return response
+            } catch BLEManagerError.noData {
+                // NO DATA is a routine reply (module asleep, unsupported PID) — not a
+                // transport failure worth retrying (a parked car polling its ignition
+                // probe would otherwise burn the whole retry budget every cycle), and
+                // not worth logging above debug severity either — a real comm failure
+                // still gets a warning per attempt below.
                 obdDebug("No data: \(command)", category: .communication)
-            } else {
-                obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
+                throw BLEManagerError.noData
+            } catch {
+                lastError = error
+                obdWarning("Command \(command) attempt \(attempt)/\(attempts) failed: \(error.localizedDescription)", category: .communication)
+                if attempt < attempts {
+                    try? await Task.sleep(nanoseconds: 150_000_000) // let the adapter settle before re-sending
+                }
             }
-            throw error
         }
+        obdError("Command failed after \(attempts) attempts: \(command)", category: .communication)
+        throw lastError ?? BLEManagerError.timeout
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
@@ -476,7 +495,7 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 }
 
-enum BLEManagerError: Error, CustomStringConvertible {
+enum BLEManagerError: Error, CustomStringConvertible, LocalizedError {
     case missingPeripheralOrCharacteristic
     case unknownCharacteristic
     case scanTimeout
@@ -527,4 +546,9 @@ enum BLEManagerError: Error, CustomStringConvertible {
             return "Error: Connection already active or in progress. Please disconnect before attempting a new connection."
         }
     }
+
+    // `CustomStringConvertible.description` alone isn't picked up by `Error.localizedDescription` —
+    // without this, every one of the messages above was unreachable through normal error handling
+    // and callers saw the generic "BLEManagerError error N." instead.
+    public var errorDescription: String? { description }
 }

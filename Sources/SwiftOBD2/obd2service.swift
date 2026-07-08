@@ -323,7 +323,15 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public func sendCommand(_ command: OBDCommand) async throws -> Result<DecodeResult, DecodeError> {
         do {
             let response = try await sendCommandInternal(command.properties.command, retries: 3)
-            guard let responseData = try elm327.canProtocol?.parse(response).first?.data else {
+            guard let messages = try elm327.canProtocol?.parse(response), !messages.isEmpty else {
+                return .failure(.noData)
+            }
+            // This is the app's per-PID live-sensor read path — on a two-ECU vehicle the
+            // old Dictionary-order `.first` picked a different module from one poll to
+            // the next, making values flicker between two sources. Prefer the response
+            // that echoes the requested PID, from the primary (lowest-address) ECM.
+            let pidEcho = UInt8(command.properties.command.dropFirst(2).prefix(2), radix: 16)
+            guard let responseData = preferredECUMessage(messages, pidEcho: pidEcho)?.data else {
                 return .failure(.noData)
             }
             return command.properties.decode(data: responseData.dropFirst())
@@ -337,6 +345,37 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     ///   - Returns: The raw response from the vehicle.
     public func getSupportedPIDs() async -> [OBDCommand] {
         await elm327.getSupportedPIDs()
+    }
+
+    /// Mode 02 — the freeze frame: the snapshot of live values the ECU stored at the
+    /// moment an emissions DTC set. It stays stored (frame 00) until codes are cleared,
+    /// so this works for codes already in memory, not just ones that appear while
+    /// connected. Which DTC owns the stored frame is a separate read: Mode 01 PID 02
+    /// (`OBDCommand.Mode1.freezeDTC`).
+    ///
+    /// Request format is `02 <PID> <frame#>`; the response payload is laid out like the
+    /// Mode 01 equivalent with one extra frame-number byte after the PID echo, so each
+    /// PID's own Mode 01 decoder applies to the payload after dropping [PID][frame#].
+    /// PIDs the vehicle didn't capture answer NO DATA and are simply omitted.
+    public func requestFreezeFrame(_ pids: [OBDCommand.Mode1], frame: UInt8 = 0) async -> [OBDCommand.Mode1: MeasurementResult] {
+        var snapshot: [OBDCommand.Mode1: MeasurementResult] = [:]
+        for pid in pids {
+            let mode1Command = OBDCommand.mode1(pid)
+            let pidHex = String(mode1Command.properties.command.dropFirst(2))
+            let command = String(format: "02%@%02X", pidHex, frame)
+            guard let response = try? await elm327.sendCommand(command, retries: 1),
+                  let messages = try? elm327.canProtocol?.parse(response),
+                  let data = preferredECUMessage(messages, pidEcho: UInt8(pidHex, radix: 16))?.data,
+                  data.count > 2
+            else { continue }
+            // message.data has already dropped the mode echo (0x42); what remains is
+            // [PID echo][frame #][payload...] — the Mode 01 decoder wants just payload.
+            if case let .success(decoded) = mode1Command.properties.decode(data: data.dropFirst(2)),
+               let measurement = decoded.measurementResult {
+                snapshot[pid] = measurement
+            }
+        }
+        return snapshot
     }
 
     ///  Scans for trouble codes and returns the result.
@@ -488,6 +527,29 @@ public enum OBDServiceError: Error {
     case scanFailed(underlyingError: Error)
     case clearFailed(underlyingError: Error)
     case commandFailed(command: String, error: Error)
+}
+
+extension OBDServiceError: LocalizedError {
+    // Without this, every consumer's `.localizedDescription` produced the useless generic
+    // "OBDServiceError error N." — every case here wraps a real underlying transport/parse
+    // error (BLEManagerError, ELM327Error, ParserError, ...) that already describes itself
+    // properly; this was the one place in the chain that discarded it.
+    public var errorDescription: String? {
+        switch self {
+        case .noAdapterFound:
+            return "No OBD adapter found."
+        case .notConnectedToVehicle:
+            return "Connected to the adapter, but not to the vehicle."
+        case .adapterConnectionFailed(let underlying):
+            return "Adapter connection failed: \(underlying.localizedDescription)"
+        case .scanFailed(let underlying):
+            return "Trouble-code scan failed: \(underlying.localizedDescription)"
+        case .clearFailed(let underlying):
+            return "Clearing trouble codes failed: \(underlying.localizedDescription)"
+        case .commandFailed(let command, let underlying):
+            return "Command '\(command)' failed: \(underlying.localizedDescription)"
+        }
+    }
 }
 
 public struct MeasurementResult: Equatable {

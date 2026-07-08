@@ -36,17 +36,44 @@ class BLEMessageProcessor {
         messageCompletion = nil
         return completion
     }
+
+    // `buffer` is mutated from two different execution contexts: CoreBluetooth's delegate
+    // queue (via processReceivedData, on every notification) and a Task cancellation
+    // handler (onCancel below), which Swift does not guarantee runs on that same queue.
+    // Reusing `completionLock` — already here for exactly this kind of cross-context
+    // hand-off — for every buffer touch avoids a second, easy-to-miss lock.
+    private func appendAndSnapshotBuffer(_ data: Data) -> Data {
+        completionLock.lock()
+        defer { completionLock.unlock() }
+        buffer.append(data)
+        return buffer
+    }
+
+    private func clearBuffer() {
+        completionLock.lock()
+        defer { completionLock.unlock() }
+        buffer.removeAll()
+    }
+
+    private func takeBuffer() -> Data {
+        completionLock.lock()
+        defer { completionLock.unlock() }
+        let captured = buffer
+        buffer.removeAll()
+        return captured
+    }
+
     /// When true, a timeout in waitForResponse returns buffered data instead of throwing.
     /// Used by sendMonitorCommand to capture ELM327 AT MA / AT MT streaming output.
     var monitorMode = false
 
     func processReceivedData(_ data: Data) {
-        buffer.append(data)
+        let snapshot = appendAndSnapshotBuffer(data)
 
-        guard let string = String(data: buffer, encoding: .utf8) else {
-            if buffer.count > BLEConstants.maxBufferSize {
+        guard let string = String(data: snapshot, encoding: .utf8) else {
+            if snapshot.count > BLEConstants.maxBufferSize {
                 logger.warning("Buffer exceeded max size, clearing")
-                buffer.removeAll()
+                clearBuffer()
             }
             return
         }
@@ -60,7 +87,7 @@ class BLEMessageProcessor {
         if string.contains(">") {
             let response = parseResponse(from: string)
             handleParsedResponse(response)
-            buffer.removeAll()
+            clearBuffer()
         }
     }
 
@@ -117,14 +144,21 @@ class BLEMessageProcessor {
                     }
                 } onCancel: { [self] in
                     self.takeCompletion()?(nil, BLEMessageProcessorError.responseTimeout)
+                    // The critical fix: a response that arrives just after we gave up
+                    // waiting for it used to sit in `buffer` untouched, waiting to be
+                    // silently prepended onto whatever the NEXT command's real response
+                    // turned out to be — a stray Mode 3 echo byte or a leftover pad byte
+                    // from an abandoned read, corrupting a completely unrelated PID's
+                    // decoded value. Every command boundary must start from an empty
+                    // buffer, timeout or not.
+                    self.clearBuffer()
                 }
             }
         } catch BLEMessageProcessorError.responseTimeout where monitorMode {
             // In monitor mode the ELM327 streams frames without a '>' terminator;
             // return whatever accumulated in the buffer rather than throwing.
             monitorMode = false
-            let captured = buffer
-            buffer.removeAll()
+            let captured = takeBuffer()
             _ = takeCompletion()
             guard let string = String(data: captured, encoding: .utf8), !string.isEmpty else { return [] }
             return string
@@ -136,7 +170,7 @@ class BLEMessageProcessor {
     }
 
     func reset() {
-           buffer.removeAll()
+           clearBuffer()
            // Call completion with error if it exists
            takeCompletion()?(nil, BLEManagerError.peripheralNotConnected)
        }

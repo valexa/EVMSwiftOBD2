@@ -204,12 +204,26 @@ class ELM327 {
         return obdProtocol
     }
 
+    /// CAN first: the overwhelming majority of vehicles on the road (MY2008+ in the US,
+    /// mid-2000s+ in the EU) use one of the four ISO 15765-4 variants, so probing legacy
+    /// protocols ahead of them — the previous order, `PROTOCOL.allCases` in declaration
+    /// order — spent up to 5 full round-trips (ATSPn + 0100 + timeout each) on protocols
+    /// that were never going to answer before ever reaching the one that would. Legacy
+    /// (pre-CAN) protocols come next, then J1939/user-defined CAN last since they're both
+    /// rare for a consumer passenger vehicle. Only reached at all when the ELM327's own
+    /// ATSP0 auto-search (`detectProtocolAutomatically`) already failed.
+    private static let manualSweepOrder: [PROTOCOL] = [
+        .protocol6, .protocol7, .protocol8, .protocol9,
+        .protocol1, .protocol2, .protocol3, .protocol4, .protocol5,
+        .protocolA, .protocolB, .protocolC,
+    ]
+
     /// Attempts to detect the OBD protocol manually.
     /// - Parameter desiredProtocol: An optional preferred protocol to attempt first.
     /// - Returns: The detected protocol, or nil if none could be found.
     /// - Throws: Various setup-related errors.
     private func detectProtocolManually() async throws -> PROTOCOL {
-        for protocolOption in PROTOCOL.allCases where protocolOption != .NONE {
+        for protocolOption in Self.manualSweepOrder {
             self.logger.info("Testing protocol: \(protocolOption.description)")
             _ = try await okResponse(protocolOption.cmd)
             if await testProtocol(protocolOption) {
@@ -279,6 +293,20 @@ class ELM327 {
             _ = try await okResponse("ATH1")
             obdDelegate?.logMessage("ATL0 / ATS0 / ATH1 → OK")
 
+            // Best-effort, not `okResponse`: both are v1.3+/v2.x features that a cheap or
+            // older clone may not implement, and an unrecognized command ("?") must not
+            // abort the whole connection over what's an optional reliability improvement.
+            // ATAT1 (adaptive timing) is Elm Electronics' own recommendation for noisy
+            // links — it grows the per-command timeout based on observed bus response
+            // time instead of a fixed one, exactly the failure mode this session kept
+            // chasing on both adapters. ATCAF1 (CAN auto-formatting) makes explicit an
+            // assumption every parser in this package already makes implicitly: that the
+            // adapter — not us — strips CAN padding/PCI framing before handing us lines.
+            obdDelegate?.logMessage("Adapter init: ATAT1 (adaptive timing) / ATCAF1 (CAN auto-format)…")
+            let atatResp = try? await sendCommand("ATAT1")
+            let atcafResp = try? await sendCommand("ATCAF1")
+            obdDelegate?.logMessage("ATAT1 → \(atatResp?.joined(separator: " | ") ?? "no response (unsupported?)"), ATCAF1 → \(atcafResp?.joined(separator: " | ") ?? "no response (unsupported?)")")
+
             obdDelegate?.logMessage("Adapter init: ATSP0 (auto protocol)…")
             _ = try await okResponse("ATSP0")
             obdDelegate?.logMessage("ATSP0 → OK — adapter ready")
@@ -339,7 +367,15 @@ class ELM327 {
         let statusCommand = OBDCommand.Mode1.status
         let statusResponse = try await sendCommand(statusCommand.properties.command)
         logger.debug("Status response: \(statusResponse)")
-        guard let statusData = try canProtocol?.parse(statusResponse).first?.data else {
+        guard let messages = try canProtocol?.parse(statusResponse), !messages.isEmpty else {
+            return .failure(.noData)
+        }
+        // MIL / DTC count / monitor readiness are a real per-ECU reading, not a bitmap to
+        // union — and `.first` (Dictionary order) was non-deterministic on a two-ECU bus.
+        // `preferredECUMessage` keys off the raw source address (lowest = primary ECM on
+        // both addressing schemes) — the `.ecu == .engine` label used before degenerates
+        // on 29-bit buses, where every module's address masks to the same "engine" label.
+        guard let statusData = preferredECUMessage(messages, pidEcho: 0x01)?.data else {
             return .failure(.noData)
         }
         // message.data is [PID, A, B, C, D]; decode() no longer strips the PID
@@ -456,7 +492,10 @@ class ELM327 {
             return nil
         }
 
-        guard let data = try? canProtocol?.parse(vinResponse).first?.data,
+        // Same non-deterministic `.first` issue as `getStatus()` — prefer the primary
+        // (lowest-source-address) ECM's answer; the Mode 09 PID echo for VIN is 0x02.
+        guard let messages = try? canProtocol?.parse(vinResponse), !messages.isEmpty,
+              let data = preferredECUMessage(messages, pidEcho: 0x02)?.data,
               var vinString = String(bytes: data, encoding: .utf8)
         else {
             return nil
@@ -547,7 +586,16 @@ extension ELM327 {
                 // Ex.
                 //        || ||
                 // 7E8 06 41 00 BE 7F B8 13
-                guard let supportedPidsByECU = parseResponse(response) else {
+                //
+                // Each getter's bitmap only covers ITS OWN 32-PID block (0100→01-20,
+                // 0120→21-40, 0140→41-60, ...) — the block base must be added to the bit
+                // index, or every getter after the first reports its bits as PIDs 01-20
+                // again. That silently capped every vehicle's live-sensor list at the
+                // first 32 standard PIDs regardless of what the ECU actually supports —
+                // anything from 0x21 up (fuel level, ambient temp, control module voltage,
+                // fuel type, fuel rate, ...) could never be recognized as supported.
+                let baseOffset = UInt8(pidGetter.properties.command.dropFirst(2), radix: 16) ?? 0
+                guard let supportedPidsByECU = parseResponse(response, baseOffset: baseOffset) else {
                     continue
                 }
 
@@ -567,20 +615,34 @@ extension ELM327 {
         return Array(Set(supportedPIDs))
     }
 
-    private func parseResponse(_ response: [String]) -> Set<String>? {
-        guard let ecuData = try? canProtocol?.parse(response).first?.data else {
+    /// Unions the supported-PID bitmap across every ECU that answered, instead of trusting
+    /// only the first one. On a vehicle with more than one ECU on the bus (e.g. a separate
+    /// module handling body/transmission PIDs), `.first` silently discarded any PID that only
+    /// the *other* ECU advertised — and since `.first` here comes from a `Dictionary`'s
+    /// iteration order, which ECU "won" wasn't even guaranteed to be the same one from one
+    /// connection to the next, so the set of sensors that showed up could vary connect to
+    /// connect on the exact same vehicle.
+    private func parseResponse(_ response: [String], baseOffset: UInt8 = 0) -> Set<String>? {
+        guard let messages = try? canProtocol?.parse(response), !messages.isEmpty else {
             return nil
         }
-        let binaryData = BitArray(data: ecuData.dropFirst()).binaryArray
-        return extractSupportedPIDs(binaryData)
+        var combined = Set<String>()
+        for message in messages {
+            guard let data = message.data else { continue }
+            combined.formUnion(extractSupportedPIDs(BitArray(data: data.dropFirst()).binaryArray, baseOffset: baseOffset))
+        }
+        return combined.isEmpty ? nil : combined
     }
 
-    func extractSupportedPIDs(_ binaryData: [Int]) -> Set<String> {
+    /// `baseOffset` is the PID number the response's bit 0 represents (0 for 0100's
+    /// PIDs 01-20, 0x20 for 0120's PIDs 21-40, etc.) — defaults to 0 so existing callers
+    /// (and the `0100`-only unit test) are unaffected.
+    func extractSupportedPIDs(_ binaryData: [Int], baseOffset: UInt8 = 0) -> Set<String> {
         var supportedPIDs: Set<String> = []
 
         for (index, value) in binaryData.enumerated() {
             if value == 1 {
-                let pid = String(format: "%02X", index + 1)
+                let pid = String(format: "%02X", Int(baseOffset) + index + 1)
                 supportedPIDs.insert(pid)
             }
         }
