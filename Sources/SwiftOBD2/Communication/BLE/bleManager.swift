@@ -360,30 +360,46 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
     ///     `BLEManagerError.peripheralNotConnected` if the peripheral is not connected.
     ///     `BLEManagerError.timeout` if the operation times out.
     ///     `BLEManagerError.unknownError` if an unknown error occurs.
-    func sendCommand(_ command: String, retries _: Int = 3) async throws -> [String] {
+    func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
         guard let peripheral = peripheralManager.connectedPeripheral else {
             obdError("Missing peripheral or ECU characteristic", category: .bluetooth)
             throw BLEManagerError.missingPeripheralOrCharacteristic
         }
 
-        obdDebug("Sending command: \(command)", category: .communication)
-
-        do {
-            try characteristicHandler.writeCommand(command, to: peripheral)
-            let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
-            obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
-            return response
-        } catch {
-            // NO DATA is a routine reply (module asleep, unsupported PID), not a
-            // transport failure — keep it at debug so a parked car polling its
-            // ignition probe doesn't flood the console with error-level lines.
-            if case BLEManagerError.noData = error {
-                obdDebug("No data: \(command)", category: .communication)
-            } else {
-                obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
+        // `retries` used to be discarded here (`retries _: Int`), so every BLE command
+        // was single-shot regardless of what the caller asked for — a dropped/timed-out
+        // response just failed instead of getting a second attempt.
+        let attempts = max(1, retries)
+        for attempt in 1...attempts {
+            obdDebug(attempt == 1 ? "Sending command: \(command)"
+                                  : "Sending command: \(command) (attempt \(attempt)/\(attempts))",
+                     category: .communication)
+            do {
+                try characteristicHandler.writeCommand(command, to: peripheral)
+                let response = try await messageProcessor.waitForResponse(timeout: BLEConstants.defaultTimeout)
+                obdDebug("Command response: \(response.joined(separator: " | "))", category: .communication)
+                return response
+            } catch {
+                // NO DATA is a routine reply (module asleep, unsupported PID), not a
+                // transport failure — keep it at debug so a parked car polling its
+                // ignition probe doesn't flood the console with error-level lines.
+                // It's also a definitive answer rather than a dropped response, so
+                // retrying it wouldn't change the outcome.
+                if case BLEManagerError.noData = error {
+                    obdDebug("No data: \(command)", category: .communication)
+                    throw error
+                }
+                guard attempt < attempts else {
+                    obdError("Command failed: \(command) - \(error.localizedDescription)", category: .communication)
+                    throw error
+                }
+                obdDebug("Retrying after error (attempt \(attempt)/\(attempts)): \(command) - \(error.localizedDescription)",
+                         category: .communication)
+                try? await Task.sleep(nanoseconds: UInt64(BLEConstants.retryDelay * 1_000_000_000))
             }
-            throw error
         }
+        // Unreachable — the loop above always returns or throws on its last iteration.
+        throw BLEManagerError.timeout
     }
 
     func sendMonitorCommand(_ command: String, duration: TimeInterval) async throws -> [String] {
