@@ -178,10 +178,15 @@ class ELM327 {
     private func detectProtocolAutomatically() async throws -> PROTOCOL {
         obdDelegate?.logMessage("Protocol detect: ATSP0 (auto-search)…")
         _ = try await okResponse("ATSP0")
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        // ELM327 auto-search needs a moment to settle onto the bus before the
+        // ECU reliably answers the first query — 1s was occasionally too tight
+        // over serial and produced a spurious "no response" here even with the
+        // vehicle live (the ATDPN/testProtocol path below still recovers via
+        // its own retries, but this cuts down false-negative noise).
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
 
         obdDelegate?.logMessage("Protocol detect: sending 0100 — waiting for vehicle…")
-        let resp100 = try? await sendCommand("0100")
+        let resp100 = try? await sendCommand("0100", retries: 2)
         logger.info("0100 raw response: \(String(describing: resp100))")
         obdDelegate?.logMessage("0100 → \(resp100.map { $0.joined(separator: " ") } ?? "no response")")
 
@@ -269,18 +274,22 @@ class ELM327 {
             logger.info("ATZ response: \(atzResp)")
             obdDelegate?.logMessage("ATZ → \(atzResp.joined(separator: " | "))")
 
+            // The port can still be settling for the first few commands after ATZ
+            // (same class of transient drop the ATZ retry above guards against), so
+            // give the rest of the init sequence the same resilience rather than
+            // failing the whole connection on one dropped frame.
             obdDelegate?.logMessage("Adapter init: ATE0 (echo off)…")
-            _ = try await okResponse("ATE0")
+            _ = try await okResponse("ATE0", retries: 3)
             obdDelegate?.logMessage("ATE0 → OK")
 
             obdDelegate?.logMessage("Adapter init: ATL0 ATH1 ATS0…")
-            _ = try await okResponse("ATL0")
-            _ = try await okResponse("ATS0")
-            _ = try await okResponse("ATH1")
+            _ = try await okResponse("ATL0", retries: 3)
+            _ = try await okResponse("ATS0", retries: 3)
+            _ = try await okResponse("ATH1", retries: 3)
             obdDelegate?.logMessage("ATL0 / ATS0 / ATH1 → OK")
 
             obdDelegate?.logMessage("Adapter init: ATSP0 (auto protocol)…")
-            _ = try await okResponse("ATSP0")
+            _ = try await okResponse("ATSP0", retries: 3)
             obdDelegate?.logMessage("ATSP0 → OK — adapter ready")
             logger.info("ELM327 adapter initialized successfully.")
         } catch {
@@ -324,8 +333,8 @@ class ELM327 {
         try await comm.sendMonitorCommand(command, duration: duration)
     }
 
-    private func okResponse(_ message: String) async throws -> [String] {
-        let response = try await sendCommand(message)
+    private func okResponse(_ message: String, retries: Int = 1) async throws -> [String] {
+        let response = try await sendCommand(message, retries: retries)
         if response.contains("OK") {
             return response
         } else {

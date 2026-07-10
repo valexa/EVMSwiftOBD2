@@ -165,16 +165,31 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     /// - Returns: Information about the connected vehicle (`OBDInfo`).
     /// - Throws: Errors that might occur during the connection process.
     public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7, peripheral: CBPeripheral? = nil) async throws -> OBDInfo {
+        do {
+            return try await attemptConnection(preferedProtocol: preferedProtocol, timeout: timeout, peripheral: peripheral)
+        } catch OBDServiceError.adapterConnectionFailed {
+            // A transient link drop mid-handshake (the adapter/port still settling
+            // right after open) is common on the very first connect and otherwise
+            // forces the user to manually retry — one clean retry here covers it.
+            obdWarning("Connection attempt failed — retrying once", category: .connection)
+            elm327.stopConnection()
+            return try await attemptConnection(preferedProtocol: preferedProtocol, timeout: timeout, peripheral: peripheral)
+        }
+        // .noAdapterFound already waited out a full BLE scan timeout — retrying
+        // immediately would just double that wait for no benefit, so it propagates as-is.
+    }
+
+    private func attemptConnection(preferedProtocol: PROTOCOL?, timeout: TimeInterval, peripheral: CBPeripheral?) async throws -> OBDInfo {
         let startTime = CFAbsoluteTimeGetCurrent()
         obdInfo("Starting connection with timeout: \(timeout)s", category: .connection)
 
         do {
             obdDebug("Connecting to adapter...", category: .connection)
             try await elm327.connectToAdapter(timeout: timeout, peripheral: peripheral)
-            
+
             obdDebug("Initializing adapter...", category: .connection)
             try await elm327.adapterInitialization()
-            
+
             obdDebug("Initializing vehicle connection...", category: .connection)
             let vehicleInfo = try await initializeVehicle(preferedProtocol)
 
@@ -187,7 +202,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             OBDLogger.shared.logPerformance("Connection failed", duration: duration, success: false)
             obdError("Connection failed: \(error.localizedDescription)", category: .connection)
-            
+
             if let bleError = error as? BLEManagerError {
                 if bleError == .peripheralNotFound || bleError == .scanTimeout {
                     throw OBDServiceError.noAdapterFound
@@ -197,7 +212,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
                     throw OBDServiceError.noAdapterFound
                 }
             }
-            
+
             throw OBDServiceError.adapterConnectionFailed(underlyingError: error) // Propagate
         }
     }
