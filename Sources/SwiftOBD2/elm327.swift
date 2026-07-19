@@ -128,6 +128,11 @@ class ELM327 {
 
         let ecuMap = populateECUMap(messages)
 
+        // The transport can drop mid-setup (the PID sweep swallows per-command
+        // errors); don't overwrite that Disconnected with Connected to Vehicle.
+        guard connectionState != .disconnected else {
+            throw ELM327Error.connectionFailed(reason: "Connection lost during vehicle setup")
+        }
         connectionState = .connectedToVehicle
         return OBDInfo(vin: vin, supportedPIDs: supportedPIDs, obdProtocol: detectedProtocol, ecuMap: ecuMap)
     }
@@ -214,10 +219,19 @@ class ELM327 {
     /// - Returns: The detected protocol, or nil if none could be found.
     /// - Throws: Various setup-related errors.
     private func detectProtocolManually() async throws -> PROTOCOL {
-        for protocolOption in PROTOCOL.allCases where protocolOption != .NONE {
+        // CAN protocols first: virtually every vehicle since ~2008 is ISO 15765-4,
+        // and each miss costs a full command timeout — starting from J1850 makes
+        // the common case the slowest. Single attempt per protocol for the same
+        // reason; the sweep is already the fallback path.
+        let sweepOrder: [PROTOCOL] = [
+            .protocol6, .protocol7, .protocol8, .protocol9,
+            .protocol1, .protocol2, .protocol3, .protocol4, .protocol5,
+            .protocolA, .protocolB, .protocolC,
+        ]
+        for protocolOption in sweepOrder {
             self.logger.info("Testing protocol: \(protocolOption.description)")
             _ = try await okResponse(protocolOption.cmd)
-            if await testProtocol(protocolOption) {
+            if await testProtocol(protocolOption, retries: 1) {
                 return protocolOption
             }
         }
@@ -231,8 +245,8 @@ class ELM327 {
     /// Tests a given protocol by sending a 0100 command and checking for a valid response.
     /// - Parameter obdProtocol: The protocol to test.
     /// - Throws: Various setup-related errors.
-    private func testProtocol(_ obdProtocol: PROTOCOL) async -> Bool {
-        let response = try? await sendCommand("0100", retries: 3)
+    private func testProtocol(_ obdProtocol: PROTOCOL, retries: Int = 3) async -> Bool {
+        let response = try? await sendCommand("0100", retries: retries)
         let raw = response?.joined(separator: " ") ?? "no response"
         if let response, response.contains(where: { $0.range(of: #"41\s*00"#, options: .regularExpression) != nil }) {
             let msg = "Protocol \(obdProtocol.description) ✓  (0100 → \(raw))"
@@ -567,6 +581,13 @@ extension ELM327 {
                 supportedPIDs.append(contentsOf: supportedCommands)
             } catch {
                 logger.error("\(error.localizedDescription)")
+                // A transport drop fails every remaining getter the same way
+                // (each one burning its full command timeout against a dead fd)
+                // — stop the sweep instead of grinding through them.
+                if connectionState == .disconnected {
+                    obdDelegate?.logMessage("Supported-PID sweep aborted — connection lost")
+                    break
+                }
             }
         }
         // filter out pidGetters

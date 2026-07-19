@@ -19,6 +19,11 @@ final class MacSerialManager: CommProtocol {
     private var responseContinuation: CheckedContinuation<String, Error>?
     private var responseToken: UUID?
     private var receiveBuffer = ""
+    // Set when a command times out: the adapter may still deliver that command's
+    // reply late, so the next send must drop pending input first or the stale
+    // reply is read as the new command's response. Main-confined like the rest
+    // of the continuation state.
+    private var needsResync = false
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example", category: "MacSerial")
 
@@ -38,8 +43,9 @@ final class MacSerialManager: CommProtocol {
             throw CommunicationError.errorOccurred(err)
         }
 
-        // Probe each baud rate: send '\r', wait 1 s, check if response is valid ASCII.
-        // tcsetattr always succeeds, so we must actually talk to the adapter to confirm.
+        // Probe each baud rate: send ATI, wait 1 s, check if response is valid ASCII
+        // and contains the prompt. tcsetattr always succeeds, so we must actually
+        // talk to the adapter to confirm.
         let candidates: [(speed_t, Int)] = [
             (speed_t(B115200), 115200),
             (speed_t(B38400),  38400),
@@ -75,14 +81,22 @@ final class MacSerialManager: CommProtocol {
         throw CommunicationError.invalidData
     }
 
-    /// Sends a bare '\r' and returns true if the bytes that come back are all printable ASCII.
-    /// Garbage bytes (baud-rate mismatch) contain high-bit or control characters.
+    /// Sends ATI and returns true if the reply is all printable ASCII and contains
+    /// the '>' prompt. Garbage bytes (baud-rate mismatch) contain high-bit or
+    /// control characters and never produce a prompt.
+    ///
+    /// ATI specifically, not a bare '\r': the ELM327 treats a lone CR as "repeat
+    /// last command", so a CR probe re-executes whatever a previous session left
+    /// in the adapter's command buffer (an ATZ re-reset, or a live 0100 query to
+    /// the vehicle) and the probe then reads that command's output as its own
+    /// response. ATI is side-effect-free, answers instantly with the version
+    /// banner, and any received character also interrupts an in-progress
+    /// protocol SEARCHING ("STOPPED") instead of replaying it.
     private func probeRespondsValidASCII() async -> Bool {
         // Flush any stale bytes before probing.
         tcflush(fileDescriptor, TCIOFLUSH)
 
-        let cr = [UInt8(0x0D)]  // '\r'
-        _ = cr.withUnsafeBufferPointer { write(fileDescriptor, $0.baseAddress, 1) }
+        writeBytes("ATI\r")
 
         // Collect bytes for up to 1 second.
         try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -97,9 +111,11 @@ final class MacSerialManager: CommProtocol {
         let printable = bytes.allSatisfy { b in
             (b >= 0x20 && b <= 0x7E) || b == 0x0D || b == 0x0A
         }
+        let hasPrompt = bytes.contains(UInt8(ascii: ">"))
+        let valid = printable && hasPrompt
         let preview = String(bytes: bytes, encoding: .ascii) ?? "<non-ASCII>"
-        logger.info("Probe at fd=\(self.fileDescriptor): \(n) bytes, valid=\(printable), preview=\(preview)")
-        return printable
+        logger.info("Probe at fd=\(self.fileDescriptor): \(n) bytes, valid=\(valid), preview=\(preview)")
+        return valid
     }
 
     private func applyBaudRate(_ baud: speed_t) -> Bool {
@@ -200,6 +216,13 @@ final class MacSerialManager: CommProtocol {
                 self.responseContinuation?.resume(throwing: CommunicationError.invalidData)
                 self.responseContinuation = continuation
                 self.responseToken = token
+                if self.needsResync {
+                    // A previous command timed out; its late reply may be sitting in
+                    // the tty input queue. Drop it right before writing so it can't
+                    // be prepended to this command's response.
+                    tcflush(self.fileDescriptor, TCIFLUSH)
+                    self.needsResync = false
+                }
                 self.receiveBuffer = ""
                 self.writeBytes(command + "\r")
 
@@ -213,6 +236,7 @@ final class MacSerialManager: CommProtocol {
                     self.obdDelegate?.logMessage("Serial: 20s timeout waiting for '\(command)' — no data received")
                     self.responseContinuation = nil
                     self.responseToken = nil
+                    self.needsResync = true
                     cont.resume(throwing: CommunicationError.invalidData)
                 }
             }
@@ -260,7 +284,8 @@ final class MacSerialManager: CommProtocol {
                             ?? "<\(bytesRead) non-ASCII bytes>"
                         await self.handleReceivedData(chunk)
                     } else if bytesRead < 0 && errno != EAGAIN {
-                        await self.handleError()
+                        let err = errno
+                        await self.handleError(errno: err)
                         break
                     }
                 }
@@ -291,9 +316,10 @@ final class MacSerialManager: CommProtocol {
     }
 
     @MainActor
-    private func handleError() {
-        logger.error("Serial read error, disconnecting")
-        obdDelegate?.logMessage("Serial: read error — disconnecting")
+    private func handleError(errno err: Int32) {
+        let reason = String(cString: strerror(err))
+        logger.error("Serial read error (errno \(err): \(reason)), disconnecting")
+        obdDelegate?.logMessage("Serial: read error — errno \(err) (\(reason)) — disconnecting")
         disconnectPeripheral()
     }
 
