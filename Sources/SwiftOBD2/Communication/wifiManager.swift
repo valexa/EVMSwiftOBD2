@@ -104,7 +104,23 @@ class WifiManager: CommProtocol {
         guard let port = NWEndpoint.Port(portString) else {
             throw CommunicationError.invalidData
         }
-        let connection = NWConnection(host: host, port: port, using: .tcp)
+        // Keepalive turns a silently dead adapter (power pulled, car off) into a
+        // real .failed transition within ~8 s; without it a half-open TCP link
+        // just times out command-by-command and connectionState never drops.
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 2
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 3
+        tcpOptions.connectionTimeout = 10
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
+        #if os(iOS)
+        // The adapter's AP has no internet, so iOS keeps the default route on
+        // cellular/another network; pinning to the Wi-Fi interface is what makes
+        // traffic flow while the status bar says "No Internet Connection".
+        params.requiredInterfaceType = .wifi
+        #endif
+        let connection = NWConnection(host: host, port: port, using: params)
         tcp = connection
 
         let gate = ConnectOnce()
@@ -163,6 +179,10 @@ class WifiManager: CommProtocol {
             let old = tcp
             old?.send(content: data, completion: .contentProcessed { _ in })
             try await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 s for adapter reset
+            // Detach the handler first: this cancel is a planned swap, and the
+            // .cancelled arm would otherwise publish a transient .disconnected
+            // that the app treats as a link drop mid-handshake.
+            old?.stateUpdateHandler = nil
             old?.cancel()
             try await connectAsync(timeout: 10, peripheral: nil)
             return ["ELM327 v2.1"]
@@ -266,6 +286,9 @@ class WifiManager: CommProtocol {
                 if let error = error {
                     logger.error("Error sending data: \(error.localizedDescription)")
                     gate.finish(throwing: CommunicationError.errorOccurred(error))
+                    // The socket is broken — cancel so the stateUpdateHandler
+                    // publishes .disconnected and the app can react to the drop.
+                    tcpConnection.cancel()
                     return
                 }
 
@@ -279,6 +302,7 @@ class WifiManager: CommProtocol {
                             gate.finish(throwing: gate.accumulated.isEmpty
                                 ? CommunicationError.errorOccurred(error)
                                 : CommunicationError.invalidData)
+                            tcpConnection.cancel()
                             return
                         }
 
