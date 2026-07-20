@@ -492,7 +492,7 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 }
 
-enum BLEManagerError: Error, CustomStringConvertible {
+enum BLEManagerError: Error, CustomStringConvertible, LocalizedError {
     case missingPeripheralOrCharacteristic
     case unknownCharacteristic
     case scanTimeout
@@ -543,4 +543,8 @@ enum BLEManagerError: Error, CustomStringConvertible {
             return "Error: Connection already active or in progress. Please disconnect before attempting a new connection."
         }
     }
+
+    // Route localizedDescription through `description` so logs show the human message
+    // ("Error: No Data") instead of the bridged-NSError fallback ("… error 5.").
+    var errorDescription: String? { description }
 }

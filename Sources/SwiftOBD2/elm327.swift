@@ -564,7 +564,7 @@ extension ELM327 {
 
         for pidGetter in pidGetters {
             do {
-                logger.info("Getting supported PIDs for \(pidGetter.properties.command)")
+                logger.debug("Getting supported PIDs for \(pidGetter.properties.command)")
                 let response = try await sendCommand(pidGetter.properties.command)
                 // find first instance of 41 plus command sent, from there we determine the position of everything else
                 // Ex.
@@ -580,13 +580,20 @@ extension ELM327 {
 
                 supportedPIDs.append(contentsOf: supportedCommands)
             } catch {
-                logger.error("\(error.localizedDescription)")
                 // A transport drop fails every remaining getter the same way
                 // (each one burning its full command timeout against a dead fd)
                 // — stop the sweep instead of grinding through them.
                 if connectionState == .disconnected {
+                    logger.error("Supported-PID sweep aborted — connection lost: \(error)")
                     obdDelegate?.logMessage("Supported-PID sweep aborted — connection lost")
                     break
+                }
+                // A "no data" refusal just means the car doesn't support this PID range /
+                // Mode — expected, so keep it at debug. Anything else is a real error.
+                if case BLEManagerError.noData = error {
+                    logger.debug("\(pidGetter.properties.command): not supported (\(error))")
+                } else {
+                    logger.error("\(pidGetter.properties.command): \(error)")
                 }
             }
         }
