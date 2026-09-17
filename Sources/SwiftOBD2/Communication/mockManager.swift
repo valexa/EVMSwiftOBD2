@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import OSLog
 import CoreBluetooth
 
 enum CommandAction {
@@ -23,7 +22,6 @@ struct MockECUSettings {
 }
 
 class MOCKComm: CommProtocol {
-    let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "MOCKComm")
 
     @Published var connectionState: ConnectionState = .disconnected
     var connectionStatePublisher: Published<ConnectionState>.Publisher { $connectionState }
@@ -32,7 +30,7 @@ class MOCKComm: CommProtocol {
     var ecuSettings: MockECUSettings = .init()
 
     func sendCommand(_ command: String, retries: Int = 3) async throws -> [String] {
-        logger.info("Sending command: \(command)")
+        obdInfo("Sending command: \(command)", category: .service)
         var header = ""
 
         let prefix = String(command.prefix(2))
@@ -68,7 +66,14 @@ class MOCKComm: CommProtocol {
                 Totallength += ffLength
 
                 var cf = Array(chunks.dropFirst())
-                Totallength += cf.joined().replacingOccurrences(of: " ", with: "").count
+                // Same hex-chars → bytes conversion as `ffLength` above (÷2) — this was
+                // adding raw hex-character count instead of byte count, roughly doubling
+                // the declared ISO-TP length. Harmless while `parser.swift`'s multi-frame
+                // assembly silently accepted a short/mismatched length, but this session's
+                // stricter bounds check there (`extractDataFromFrame` now throws instead of
+                // truncating) turned that inflated length into every multi-PID mock
+                // response failing to decode in the Simulator.
+                Totallength += cf.joined().replacingOccurrences(of: " ", with: "").count / 2
 
                 var lengthHex = String(format: "%02X", Totallength - 1)
 

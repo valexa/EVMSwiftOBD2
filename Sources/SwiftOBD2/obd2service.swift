@@ -165,16 +165,55 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     /// - Returns: Information about the connected vehicle (`OBDInfo`).
     /// - Throws: Errors that might occur during the connection process.
     public func startConnection(preferedProtocol: PROTOCOL? = nil, timeout: TimeInterval = 7, peripheral: CBPeripheral? = nil) async throws -> OBDInfo {
+        do {
+            return try await attemptConnection(preferedProtocol: preferedProtocol, timeout: timeout, peripheral: peripheral)
+        } catch OBDServiceError.adapterConnectionFailed(let underlying) where Self.isWorthRetrying(underlying) {
+            // A transient link drop mid-handshake (the adapter/port still settling
+            // right after open) is common on the very first connect and otherwise
+            // forces the user to manually retry — one clean retry here covers it.
+            obdWarning("Connection attempt failed — retrying once", category: .connection)
+            elm327.stopConnection()
+            return try await attemptConnection(preferedProtocol: preferedProtocol, timeout: timeout, peripheral: peripheral)
+        }
+        // .noAdapterFound already waited out a full BLE scan timeout — retrying
+        // immediately would just double that wait for no benefit, so it propagates as-is.
+    }
+
+    /// Which handshake failures are worth one immediate retry.
+    ///
+    /// A transport that dropped while the adapter or port was still settling usually
+    /// succeeds on the second try and costs a second or two to find out. A vehicle-level
+    /// failure does not: `noProtocolFound` has already paid for the ELM327's own ATSP0
+    /// auto-search *plus* a full 12-protocol manual sweep, each miss costing `ATSPn` +
+    /// `0100` + a full command timeout. Repeating that doubles a wait the user is already
+    /// sitting through and ends with the same answer — and because a consuming app may
+    /// well retry on top of this one, a retry here is never as cheap as it looks.
+    private static func isWorthRetrying(_ error: Error) -> Bool {
+        guard let elmError = error as? ELM327Error else {
+            // Transport-level errors (BLE/WiFi/serial) are the transient case this exists for.
+            return true
+        }
+        switch elmError {
+        case .noProtocolFound, .invalidProtocol, .ignitionOff, .invalidResponse:
+            // The vehicle answered (or definitively didn't) — asking again changes nothing.
+            return false
+        case .adapterInitializationFailed, .connectionFailed, .timeout, .unknownError:
+            // The link itself faltered; this is the drop a second attempt recovers from.
+            return true
+        }
+    }
+
+    private func attemptConnection(preferedProtocol: PROTOCOL?, timeout: TimeInterval, peripheral: CBPeripheral?) async throws -> OBDInfo {
         let startTime = CFAbsoluteTimeGetCurrent()
         obdInfo("Starting connection with timeout: \(timeout)s", category: .connection)
 
         do {
             obdDebug("Connecting to adapter...", category: .connection)
             try await elm327.connectToAdapter(timeout: timeout, peripheral: peripheral)
-            
+
             obdDebug("Initializing adapter...", category: .connection)
             try await elm327.adapterInitialization()
-            
+
             obdDebug("Initializing vehicle connection...", category: .connection)
             let vehicleInfo = try await initializeVehicle(preferedProtocol)
 
@@ -187,7 +226,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
             let duration = CFAbsoluteTimeGetCurrent() - startTime
             OBDLogger.shared.logPerformance("Connection failed", duration: duration, success: false)
             obdError("Connection failed: \(error.localizedDescription)", category: .connection)
-            
+
             if let bleError = error as? BLEManagerError {
                 if bleError == .peripheralNotFound || bleError == .scanTimeout {
                     throw OBDServiceError.noAdapterFound
@@ -197,7 +236,7 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
                     throw OBDServiceError.noAdapterFound
                 }
             }
-            
+
             throw OBDServiceError.adapterConnectionFailed(underlyingError: error) // Propagate
         }
     }
@@ -323,7 +362,15 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public func sendCommand(_ command: OBDCommand) async throws -> Result<DecodeResult, DecodeError> {
         do {
             let response = try await sendCommandInternal(command.properties.command, retries: 3)
-            guard let responseData = try elm327.canProtocol?.parse(response).first?.data else {
+            guard let messages = try elm327.canProtocol?.parse(response), !messages.isEmpty else {
+                return .failure(.noData)
+            }
+            // This is the app's per-PID live-sensor read path — on a two-ECU vehicle the
+            // old Dictionary-order `.first` picked a different module from one poll to
+            // the next, making values flicker between two sources. Prefer the response
+            // that echoes the requested PID, from the primary (lowest-address) ECM.
+            let pidEcho = UInt8(command.properties.command.dropFirst(2).prefix(2), radix: 16)
+            guard let responseData = preferredECUMessage(messages, pidEcho: pidEcho)?.data else {
                 return .failure(.noData)
             }
             return command.properties.decode(data: responseData.dropFirst())
@@ -337,6 +384,37 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     ///   - Returns: The raw response from the vehicle.
     public func getSupportedPIDs() async -> [OBDCommand] {
         await elm327.getSupportedPIDs()
+    }
+
+    /// Mode 02 — the freeze frame: the snapshot of live values the ECU stored at the
+    /// moment an emissions DTC set. It stays stored (frame 00) until codes are cleared,
+    /// so this works for codes already in memory, not just ones that appear while
+    /// connected. Which DTC owns the stored frame is a separate read: Mode 01 PID 02
+    /// (`OBDCommand.Mode1.freezeDTC`).
+    ///
+    /// Request format is `02 <PID> <frame#>`; the response payload is laid out like the
+    /// Mode 01 equivalent with one extra frame-number byte after the PID echo, so each
+    /// PID's own Mode 01 decoder applies to the payload after dropping [PID][frame#].
+    /// PIDs the vehicle didn't capture answer NO DATA and are simply omitted.
+    public func requestFreezeFrame(_ pids: [OBDCommand.Mode1], frame: UInt8 = 0) async -> [OBDCommand.Mode1: MeasurementResult] {
+        var snapshot: [OBDCommand.Mode1: MeasurementResult] = [:]
+        for pid in pids {
+            let mode1Command = OBDCommand.mode1(pid)
+            let pidHex = String(mode1Command.properties.command.dropFirst(2))
+            let command = String(format: "02%@%02X", pidHex, frame)
+            guard let response = try? await elm327.sendCommand(command, retries: 1),
+                  let messages = try? elm327.canProtocol?.parse(response),
+                  let data = preferredECUMessage(messages, pidEcho: UInt8(pidHex, radix: 16))?.data,
+                  data.count > 2
+            else { continue }
+            // message.data has already dropped the mode echo (0x42); what remains is
+            // [PID echo][frame #][payload...] — the Mode 01 decoder wants just payload.
+            if case let .success(decoded) = mode1Command.properties.decode(data: data.dropFirst(2)),
+               let measurement = decoded.measurementResult {
+                snapshot[pid] = measurement
+            }
+        }
+        return snapshot
     }
 
     ///  Scans for trouble codes and returns the result.
@@ -488,6 +566,29 @@ public enum OBDServiceError: Error {
     case scanFailed(underlyingError: Error)
     case clearFailed(underlyingError: Error)
     case commandFailed(command: String, error: Error)
+}
+
+extension OBDServiceError: LocalizedError {
+    // Without this, every consumer's `.localizedDescription` produced the useless generic
+    // "OBDServiceError error N." — every case here wraps a real underlying transport/parse
+    // error (BLEManagerError, ELM327Error, ParserError, ...) that already describes itself
+    // properly; this was the one place in the chain that discarded it.
+    public var errorDescription: String? {
+        switch self {
+        case .noAdapterFound:
+            return "No OBD adapter found."
+        case .notConnectedToVehicle:
+            return "Connected to the adapter, but not to the vehicle."
+        case .adapterConnectionFailed(let underlying):
+            return "Adapter connection failed: \(underlying.localizedDescription)"
+        case .scanFailed(let underlying):
+            return "Trouble-code scan failed: \(underlying.localizedDescription)"
+        case .clearFailed(let underlying):
+            return "Clearing trouble codes failed: \(underlying.localizedDescription)"
+        case .commandFailed(let command, let underlying):
+            return "Command '\(command)' failed: \(underlying.localizedDescription)"
+        }
+    }
 }
 
 public struct MeasurementResult: Equatable {

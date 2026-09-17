@@ -8,7 +8,6 @@
 import CoreBluetooth
 import Foundation
 import Network
-import OSLog
 
 // CommProtocol and CommunicationError are defined in CommProtocol.swift
 
@@ -83,8 +82,6 @@ private final class ConnectOnce: @unchecked Sendable {
 class WifiManager: CommProtocol {
     @Published var connectionState: ConnectionState = .disconnected
 
-    let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.app", category: "wifiManager")
-
     var obdDelegate: OBDServiceDelegate?
 
     var connectionStatePublisher: Published<ConnectionState>.Publisher { $connectionState }
@@ -104,7 +101,23 @@ class WifiManager: CommProtocol {
         guard let port = NWEndpoint.Port(portString) else {
             throw CommunicationError.invalidData
         }
-        let connection = NWConnection(host: host, port: port, using: .tcp)
+        // Keepalive turns a silently dead adapter (power pulled, car off) into a
+        // real .failed transition within ~8 s; without it a half-open TCP link
+        // just times out command-by-command and connectionState never drops.
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 2
+        tcpOptions.keepaliveInterval = 2
+        tcpOptions.keepaliveCount = 3
+        tcpOptions.connectionTimeout = 10
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
+        #if os(iOS)
+        // The adapter's AP has no internet, so iOS keeps the default route on
+        // cellular/another network; pinning to the Wi-Fi interface is what makes
+        // traffic flow while the status bar says "No Internet Connection".
+        params.requiredInterfaceType = .wifi
+        #endif
+        let connection = NWConnection(host: host, port: port, using: params)
         tcp = connection
 
         let gate = ConnectOnce()
@@ -126,15 +139,15 @@ class WifiManager: CommProtocol {
                 guard let self = self else { return }
                 switch newState {
                 case .ready:
-                    self.logger.info("Connected to \(host.debugDescription):\(port.debugDescription)")
+                    obdInfo("Connected to \(host.debugDescription):\(port.debugDescription)", category: .wifi)
                     self.connectionState = .connectedToAdapter
                     gate.finishSuccess()
                 case let .waiting(error):
                     // The Local Network permission prompt parks the connection here until the user
                     // answers, so don't fail fast — the timeout above is the only stop condition.
-                    self.logger.warning("Connection waiting: \(error.localizedDescription)")
+                    obdInfo("Connection waiting: \(error.localizedDescription)", category: .wifi)
                 case let .failed(error):
-                    self.logger.error("Connection failed: \(error.localizedDescription)")
+                    obdError("Connection failed: \(error.localizedDescription)", category: .connection)
                     self.connectionState = .disconnected
                     gate.finish(throwing: CommunicationError.errorOccurred(error))
                 case .cancelled:
@@ -154,7 +167,7 @@ class WifiManager: CommProtocol {
         guard let data = "\(command)\r".data(using: .ascii) else {
             throw CommunicationError.invalidData
         }
-        logger.info("Sending: \(command)")
+        obdDebug("Sending: \(command)", category: .communication)
 
         // ATZ resets the adapter hardware — most WiFi ELM327 adapters drop the TCP
         // connection immediately after. Fire-and-forget the command, wait for the
@@ -163,6 +176,10 @@ class WifiManager: CommProtocol {
             let old = tcp
             old?.send(content: data, completion: .contentProcessed { _ in })
             try await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 s for adapter reset
+            // Detach the handler first: this cancel is a planned swap, and the
+            // .cancelled arm would otherwise publish a transient .disconnected
+            // that the app treats as a link drop mid-handshake.
+            old?.stateUpdateHandler = nil
             old?.cancel()
             try await connectAsync(timeout: 10, peripheral: nil)
             return ["ELM327 v2.1"]
@@ -233,14 +250,27 @@ class WifiManager: CommProtocol {
                 if let lines = processResponse(response) {
                     return lines
                 } else if attempt < attempts {
-                    logger.info("No data received, retrying attempt \(attempt + 1) of \(attempts)...")
+                    obdDebug("No data received, retrying attempt \(attempt + 1) of \(attempts)...", category: .communication)
                     try await Task.sleep(nanoseconds: 100_000_000) // 0.1 second delay
                 }
             } catch {
                 if attempt == attempts {
                     throw error
                 }
-                logger.warning("Attempt \(attempt) failed, retrying: \(error.localizedDescription)")
+                // A fatal socket error cancels the connection (see sendAndReceiveData), and
+                // a cancelled or failed NWConnection never recovers — every remaining
+                // attempt would fail instantly against a dead socket, burning the retry
+                // budget and the sleeps between them for nothing.
+                if let state = tcp?.state {
+                    switch state {
+                    case .cancelled, .failed:
+                        obdDebug("Socket is \(state) — abandoning remaining attempts", category: .communication)
+                        throw error
+                    default:
+                        break
+                    }
+                }
+                obdDebug("Attempt \(attempt) failed, retrying: \(error.localizedDescription)", category: .communication)
             }
         }
         throw CommunicationError.invalidData
@@ -250,8 +280,6 @@ class WifiManager: CommProtocol {
         guard let tcpConnection = tcp else {
             throw CommunicationError.invalidData
         }
-        let logger = self.logger
-
         let gate = ResumeOnce()
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -264,8 +292,11 @@ class WifiManager: CommProtocol {
 
             tcpConnection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
-                    logger.error("Error sending data: \(error.localizedDescription)")
+                    obdError("Error sending data: \(error.localizedDescription)", category: .communication)
                     gate.finish(throwing: CommunicationError.errorOccurred(error))
+                    // The socket is broken — cancel so the stateUpdateHandler
+                    // publishes .disconnected and the app can react to the drop.
+                    tcpConnection.cancel()
                     return
                 }
 
@@ -275,10 +306,11 @@ class WifiManager: CommProtocol {
                     tcpConnection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { chunk, _, isComplete, error in
                         if gate.isDone { return }
                         if let error = error {
-                            logger.error("Error receiving data: \(error.localizedDescription)")
+                            obdError("Error receiving data: \(error.localizedDescription)", category: .communication)
                             gate.finish(throwing: gate.accumulated.isEmpty
                                 ? CommunicationError.errorOccurred(error)
                                 : CommunicationError.invalidData)
+                            tcpConnection.cancel()
                             return
                         }
 
@@ -286,8 +318,15 @@ class WifiManager: CommProtocol {
                             gate.append(str)
                         }
 
-                        if gate.accumulated.contains(">") || isComplete {
+                        if gate.accumulated.contains(">") {
                             gate.finishWithAccumulated()
+                        } else if isComplete {
+                            // `isComplete` here means the TCP stream reached EOF — the
+                            // adapter (or the WiFi link) closed the connection before ever
+                            // sending the closing prompt. Treating this as success used to
+                            // hand whatever partial bytes arrived to the parser as if they
+                            // were a complete, well-formed response.
+                            gate.finish(throwing: CommunicationError.connectionClosed)
                         } else {
                             readNext()
                         }
@@ -300,16 +339,24 @@ class WifiManager: CommProtocol {
     }
 
     private func processResponse(_ response: String) -> [String]? {
-        logger.info("Processing response: \(response)")
-        var lines = response.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        obdDebug("Processing response: \(response)", category: .communication)
+        // Strip the '>' prompt character itself rather than dropping whichever line
+        // contains it: some WiFi ELM327 clones append the prompt directly onto the
+        // last data line with no preceding newline (e.g. "43 00 00 00 00 00 00>" as
+        // one line). The previous `lines.last?.contains(">") → removeLast()` logic
+        // discarded that entire line — including real trouble-code/measurement
+        // bytes — whenever the adapter happened to frame it that way. Also trim
+        // each line before the "no data" check: an untrimmed trailing \r made
+        // "no data\r" fail to match "no data" and read as a real (garbage) line.
+        let lines = response
+            .replacingOccurrences(of: ">", with: "")
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         guard !lines.isEmpty else {
-            logger.warning("Empty response lines")
+            obdDebug("Empty response lines", category: .communication)
             return nil
-        }
-
-        if lines.last?.contains(">") == true {
-            lines.removeLast()
         }
 
         if lines.first?.lowercased() == "no data" {
