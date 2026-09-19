@@ -29,6 +29,11 @@ class BLECharacteristicHandler {
     private(set) var deviceInfo: [String: String] = [:]
     var onDeviceInfoUpdated: (([String: String]) -> Void)?
 
+    // Characteristics that didn't match a known UUID, a Device Info label, or
+    // ISSC UART — kept only so applyFallbackIfNeeded has something to
+    // classify by properties if the known-UUID pass never finds a usable pair.
+    private var unclassifiedCharacteristics: [CBCharacteristic] = []
+
     var isReady: Bool {
         ecuReadCharacteristic != nil && ecuWriteCharacteristic != nil
     }
@@ -87,10 +92,70 @@ class BLECharacteristicHandler {
 
             default:
                 obdInfo("Unknown characteristic: \(uuid) — properties: \(characteristic.properties.rawValue)", category: .bluetooth)
+                // Not a UUID we recognise — hold onto it in case
+                // applyFallbackIfNeeded has to classify by properties instead.
+                unclassifiedCharacteristics.append(characteristic)
             }
         }
 
         obdInfo("Characteristics setup — Read: \(self.ecuReadCharacteristic != nil), Write: \(self.ecuWriteCharacteristic != nil)", category: .bluetooth)
+    }
+
+    /// Last-resort classification for an adapter whose GATT layout matches
+    /// none of the known UUID families (FFE0/FFF0/18F0/ISSC).
+    ///
+    /// Every ELM327-style clone still needs exactly the same shape of
+    /// channel — something the phone can write ASCII AT commands to, and
+    /// something that notifies back with the response — it's only the UUIDs
+    /// wrapping that shape that vary by manufacturer. So instead of giving up
+    /// when no known UUID matched, pick a plausible pair by characteristic
+    /// properties: a write candidate (`.write` or `.writeWithoutResponse`)
+    /// and a notify/read candidate (`.notify` or `.read`), preferring one
+    /// characteristic that offers both if available (mirrors FFE1's
+    /// single-characteristic read+write shape).
+    ///
+    /// This is a best-effort guess, not a confirmed match — the caller finds
+    /// out for certain when the adapter answers (or doesn't) the first `ATZ`
+    /// sent once "characteristics setup" completes.
+    func applyFallbackIfNeeded(on peripheral: CBPeripheral) {
+        guard !isReady, !unclassifiedCharacteristics.isEmpty else { return }
+
+        obdInfo("No known OBD characteristic UUIDs matched — attempting property-based fallback across \(unclassifiedCharacteristics.count) candidate(s)", category: .bluetooth)
+
+        let pair = Self.selectFallbackPair(from: unclassifiedCharacteristics)
+        ecuWriteCharacteristic = pair.write
+        ecuReadCharacteristic = pair.read
+
+        if let read = ecuReadCharacteristic, read.properties.contains(.notify) {
+            peripheral.setNotifyValue(true, for: read)
+        }
+
+        obdInfo("Fallback classification — Read: \(ecuReadCharacteristic?.uuid.uuidString ?? "none"), Write: \(ecuWriteCharacteristic?.uuid.uuidString ?? "none")", category: .bluetooth)
+    }
+
+    /// Pure selection logic behind `applyFallbackIfNeeded`, split out so it's
+    /// testable without a live `CBPeripheral` (which has no public
+    /// initializer). See `applyFallbackIfNeeded` for the rationale.
+    static func selectFallbackPair(from candidates: [CBCharacteristic]) -> (read: CBCharacteristic?, write: CBCharacteristic?) {
+        // A characteristic offering both write and notify/read (like FFE1) is
+        // the strongest signal — try those first so read/write end up on the
+        // same characteristic rather than split across two unrelated ones.
+        let combined = candidates.first { c in
+            (c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse))
+                && (c.properties.contains(.notify) || c.properties.contains(.read))
+        }
+
+        if let combined = combined {
+            return (read: combined, write: combined)
+        }
+
+        let write = candidates.first {
+            $0.properties.contains(.write) || $0.properties.contains(.writeWithoutResponse)
+        }
+        let read = candidates.first {
+            $0.properties.contains(.notify) || $0.properties.contains(.read)
+        }
+        return (read: read, write: write)
     }
 
     func discoverCharacteristics(for service: CBService, on peripheral: CBPeripheral) {
@@ -148,6 +213,7 @@ class BLECharacteristicHandler {
         ecuReadCharacteristic = nil
         ecuWriteCharacteristic = nil
         deviceInfo = [:]
+        unclassifiedCharacteristics = []
     }
 
     // MARK: - Decoding

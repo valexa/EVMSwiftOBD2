@@ -341,19 +341,35 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     /// - Returns: measurement result
     /// - Throws: Errors that might occur during the request process.
     public func requestPIDs(_ commands: [OBDCommand], unit: MeasurementUnit) async throws -> [OBDCommand: MeasurementResult] {
-        let response = try await sendCommandInternal("01" + commands.compactMap { $0.properties.command.dropFirst(2) }.joined(), retries: 10)
+        // A mode-01 request concatenates every requested PID into one query
+        // string ("010C0D0511..."). SAE J1979 caps a single request at 6 data
+        // bytes beyond the mode byte under CAN framing, and in practice many
+        // ECUs return a flat "NO DATA" for the whole query once that's
+        // exceeded rather than answering the PIDs that would've fit.
+        // Chunking keeps each individual request within that limit and
+        // merges the results, so a long poll list still costs a few
+        // round-trips instead of coming back empty every cycle.
+        var results: [OBDCommand: MeasurementResult] = [:]
+        for chunk in commands.chunked(into: Self.maxPIDsPerRequest) {
+            let response = try await sendCommandInternal("01" + chunk.compactMap { $0.properties.command.dropFirst(2) }.joined(), retries: 10)
 
-        guard let responseData = try elm327.canProtocol?.parse(response).first?.data else { return [:] }
+            guard let responseData = try elm327.canProtocol?.parse(response).first?.data else { continue }
 
-        var batchedResponse = BatchedResponse(response: responseData, unit)
-
-        let results: [OBDCommand: MeasurementResult] = commands.reduce(into: [:]) { result, command in
-            let measurement = batchedResponse.extractValue(command)
-            result[command] = measurement
+            var batchedResponse = BatchedResponse(response: responseData, unit)
+            for command in chunk {
+                results[command] = batchedResponse.extractValue(command)
+            }
         }
 
         return results
     }
+
+    /// Maximum PIDs bundled into a single mode-01 query. SAE J1979 allows up
+    /// to 6 data bytes per request under CAN framing (7-byte frame minus the
+    /// mode byte) — this stays at that ceiling so vehicles which enforce the
+    /// spec strictly (rather than accepting a longer multi-frame query) get a
+    /// request they'll actually answer.
+    private static let maxPIDsPerRequest = 6
 
     /// Sends an OBD2 command to the vehicle and returns the raw response.
     ///  - Parameter command: The OBD2 command to send.
@@ -635,4 +651,16 @@ public struct VINInfo: Codable, Hashable {
     public let ModelYear: String
     public let EngineCylinders: String
     public let Trim: String?
+}
+
+extension Array {
+    /// Splits into consecutive slices of at most `size` elements each. The
+    /// last slice may be shorter. Used by `requestPIDs` to keep each mode-01
+    /// query within the PID count a vehicle will actually answer.
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0 ..< Swift.min($0 + size, count)])
+        }
+    }
 }

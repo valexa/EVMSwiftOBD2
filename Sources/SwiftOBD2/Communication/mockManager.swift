@@ -263,7 +263,7 @@ extension OBDCommand {
                     return "11" + " " + hexPos
                 case .fuelLevel:
                     let level = Int.random(in: 0...100)
-                    let hexLevel = String(format: "%02X", Double(level) * 2.55)
+                    let hexLevel = String(format: "%02X", Int(Double(level) * 2.55))
                     return "2F" + " " + hexLevel
                 case .fuelPressure:
                     let pressure = Int.random(in: 0...765)
@@ -370,6 +370,12 @@ extension OBDCommand {
                     let hexA = String(format: "%02X", A)
                     let hexB = String(format: "%02X", B)
                     return "5B" + " " + hexA + " " + hexB
+                case .controlModuleVoltage:
+                    // PID 0x42: control module voltage, encoded as (A*256+B) / 1000 volts
+                    let millivolts = Int(Double.random(in: 13.5...14.5) * 1000)
+                    let A = millivolts / 256
+                    let B = millivolts % 256
+                    return "42" + " " + String(format: "%02X", A) + " " + String(format: "%02X", B)
                 default:
                     return nil
             }

@@ -14,6 +14,14 @@ class BLEPeripheralManager: NSObject, ObservableObject {
     @Published var connectedPeripheral: CBPeripheral?
     private let characteristicHandler: BLECharacteristicHandler
 
+    // Tracks how many of the peripheral's services still owe us a
+    // didDiscoverCharacteristicsFor callback. Once it reaches zero without
+    // characteristicHandler.isReady, every known-UUID service the peripheral
+    // has to offer has already been examined and come up empty — that's the
+    // signal to fall back to classifying by characteristic properties instead
+    // of giving up (see BLECharacteristicHandler.applyFallbackIfNeeded).
+    private var pendingServiceDiscoveries = 0
+
     weak var delegate: BLEPeripheralManagerDelegate?
     // Resumed from the CB queue (characteristics ready/failed), reset() on an
     // arbitrary thread, or the cancellation handler — take-once so those racing
@@ -30,8 +38,16 @@ class BLEPeripheralManager: NSObject, ObservableObject {
         connectedPeripheral = peripheral
         connectedPeripheral?.delegate = self
 
+        pendingServiceDiscoveries = 0
+
         if let peripheral = peripheral {
-            peripheral.discoverServices(BLEPeripheralScanner.supportedServices)
+            // Discover every service, not just the known OBD UUIDs. An adapter
+            // whose GATT layout we've never seen still needs its services
+            // reported so the fallback classifier (triggered from
+            // didDiscoverCharacteristics below) gets a chance to look at them.
+            // Filtering here would hide them from CoreBluetooth's delegate
+            // entirely, before characteristicHandler ever runs.
+            peripheral.discoverServices(nil)
         }
     }
 
@@ -62,22 +78,36 @@ class BLEPeripheralManager: NSObject, ObservableObject {
     }
 
     func didDiscoverServices(_ peripheral: CBPeripheral, error: Error?) {
-        for service in peripheral.services ?? [] {
+        let services = peripheral.services ?? []
+        pendingServiceDiscoveries = services.count
+        for service in services {
             obdInfo("Discovered service: \(service.uuid.uuidString)", category: .bluetooth)
             characteristicHandler.discoverCharacteristics(for: service, on: peripheral)
         }
     }
 
     func didDiscoverCharacteristics(_ peripheral: CBPeripheral, service: CBService, error: Error?) {
-        if let error = error {
-            obdError("Error discovering characteristics: \(error.localizedDescription)", category: .bluetooth)
-            setupCompletion.take()?(nil, error)
-            return
+        if pendingServiceDiscoveries > 0 {
+            pendingServiceDiscoveries -= 1
         }
 
-        guard let characteristics = service.characteristics else { return }
+        if let error = error {
+            obdError("Error discovering characteristics: \(error.localizedDescription)", category: .bluetooth)
+            // Don't fail the whole setup on one service's error — an unrelated
+            // service (e.g. Device Information) can legitimately refuse
+            // discovery while the OBD service still comes through fine.
+        } else if let characteristics = service.characteristics {
+            characteristicHandler.setupCharacteristics(characteristics, on: peripheral)
+        }
 
-        characteristicHandler.setupCharacteristics(characteristics, on: peripheral)
+        // Every known-UUID candidate has reported and none produced a usable
+        // read/write pair — try classifying by characteristic properties
+        // instead of failing outright. Adapters we've never cataloged by
+        // UUID still tend to expose one write-ish and one notify-ish
+        // characteristic; this is what makes them work without a code change.
+        if !characteristicHandler.isReady && pendingServiceDiscoveries == 0 {
+            characteristicHandler.applyFallbackIfNeeded(on: peripheral)
+        }
 
         // Check if all required characteristics are set up
         if characteristicHandler.isReady {
