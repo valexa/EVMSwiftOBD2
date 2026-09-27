@@ -9,7 +9,8 @@ import Foundation
 
 /// Which diagnostic service reported a DTC, i.e. how "mature"/persistent the
 /// fault is. Lets the UI badge a code as Confirmed (Mode $03), Pending (Mode
-/// $07) or Permanent (Mode $0A) rather than presenting every code the same way.
+/// $07), Permanent (Mode $0A) or Historical (UDS $19, stored but not failing now)
+/// rather than presenting every code the same way.
 public enum DTCStatus: String, Codable, Hashable, Sendable, CaseIterable {
     /// Mode $03 — a matured, confirmed emission-related fault (MIL on).
     case confirmed
@@ -19,6 +20,9 @@ public enum DTCStatus: String, Codable, Hashable, Sendable, CaseIterable {
     /// Mode $0A — confirmed fault the ECU will retain until it self-verifies the
     /// repair over several drive cycles; a scan-tool clear won't remove it.
     case permanent
+    /// UDS $19 — confirmed and stored by the module, but its last test passed:
+    /// the fault happened before and is not present now.
+    case historical
 
     /// SAE mode that produces this status, e.g. "03" / "07" / "0A".
     public var mode: String {
@@ -26,6 +30,7 @@ public enum DTCStatus: String, Codable, Hashable, Sendable, CaseIterable {
         case .confirmed: return "03"
         case .pending:   return "07"
         case .permanent: return "0A"
+        case .historical: return "19"
         }
     }
 
@@ -35,16 +40,19 @@ public enum DTCStatus: String, Codable, Hashable, Sendable, CaseIterable {
         case .confirmed: return "Confirmed"
         case .pending:   return "Pending"
         case .permanent: return "Permanent"
+        case .historical: return "Historical"
         }
     }
 
     /// Merge precedence when the same code surfaces from more than one mode:
-    /// permanent (most persistent) wins over confirmed, which wins over pending.
+    /// permanent (most persistent) wins over confirmed, which wins over pending,
+    /// which wins over historical (not failing now).
     public var priority: Int {
         switch self {
-        case .permanent: return 3
-        case .confirmed: return 2
-        case .pending:   return 1
+        case .permanent:  return 4
+        case .confirmed:  return 3
+        case .pending:    return 2
+        case .historical: return 1
         }
     }
 }

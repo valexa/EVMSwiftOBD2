@@ -492,18 +492,29 @@ class ELM327 {
         guard bytes.count >= 3, bytes[0] == 0x59, bytes[1] == 0x02 else { return [] }
         var result: [TroubleCode] = []
         var i = 3
-        while i + 3 <= bytes.count {
+        while i + 4 <= bytes.count {
             let b1 = bytes[i], b2 = bytes[i + 1], b3 = bytes[i + 2]
             // parseDTC builds the base P/C/B/U code from b1,b2 (and rejects 00 00).
             if let base = parseDTC(Data([b1, b2])) {
                 // b3 is the ISO 14229 failure-type byte; append as "-XX" so distinct
                 // sub-faults of the same base code stay distinct.
                 let code = base.code + String(format: "-%02X", b3)
-                result.append(TroubleCode(code: code, description: base.description))
+                result.append(TroubleCode(code: code, description: base.description,
+                                          status: Self.udsStatus(bytes[i + 3])))
             }
             i += 4
         }
         return result
+    }
+
+    /// Maps an ISO 14229 DTC status byte to the badge status. bit0 testFailed
+    /// means failing right now; bit3 confirmedDTC without it is a stored,
+    /// historical fault; bit2 pendingDTC alone is a single failed cycle.
+    static func udsStatus(_ mask: UInt8) -> DTCStatus {
+        if mask & 0x01 != 0 { return .confirmed }
+        if mask & 0x08 != 0 { return .historical }
+        if mask & 0x04 != 0 { return .pending }
+        return .historical
     }
 
     func clearTroubleCodes() async throws {
