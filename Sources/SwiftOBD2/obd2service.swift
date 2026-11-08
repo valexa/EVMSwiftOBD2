@@ -12,12 +12,14 @@ public protocol OBDServiceDelegate: AnyObject {
     func connectionStateChanged(state: ConnectionState)
     func peripheralsUpdated(_ peripherals: [CBPeripheral])
     func adapterInfoUpdated(_ info: [String: String])
+    func advertisedNameUpdated(_ name: String, for identifier: UUID)
     func logMessage(_ message: String)
 }
 
 extension OBDServiceDelegate {
     public func peripheralsUpdated(_ peripherals: [CBPeripheral]) {}
     public func adapterInfoUpdated(_ info: [String: String]) {}
+    public func advertisedNameUpdated(_ name: String, for identifier: UUID) {}
     public func logMessage(_ message: String) {}
 }
 
@@ -83,6 +85,11 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
     public var onPeripheralsUpdated: (([CBPeripheral]) -> Void)?
     public var onScanningChanged: ((Bool) -> Void)?
     public var onAdapterInfoUpdated: (([String: String]) -> Void)?
+    /// The local name a Bluetooth dongle advertises, per peripheral, on each discovery.
+    /// `CBPeripheral.name` prefers the GAP device name once iOS has read it, and many
+    /// dongles set the two differently, so it can flip between two names for one dongle.
+    /// The advertised name is fixed by the firmware.
+    public var onAdvertisedNameUpdated: ((UUID, String) -> Void)?
     public var onLog: ((String) -> Void)?
     @Published public var connectionType: ConnectionType {
         didSet {
@@ -150,6 +157,12 @@ public class OBDService: ObservableObject, OBDServiceDelegate, @unchecked Sendab
         DispatchQueue.main.async {
             self.adapterInfo = info
             self.onAdapterInfoUpdated?(info)
+        }
+    }
+
+    public func advertisedNameUpdated(_ name: String, for identifier: UUID) {
+        DispatchQueue.main.async {
+            self.onAdvertisedNameUpdated?(identifier, name)
         }
     }
 

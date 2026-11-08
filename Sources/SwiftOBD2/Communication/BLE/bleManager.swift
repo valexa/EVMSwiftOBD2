@@ -211,8 +211,16 @@ class BLEManager: NSObject, CommProtocol, BLEPeripheralManagerDelegate {
         // Snapshot on the BLE queue (where the scanner mutates the array) so the
         // main-queue delegate call doesn't read it mid-mutation.
         let found = peripheralScanner.foundPeripherals
+        // The firmware's own name for the dongle. `peripheral.name` can't stand in for it:
+        // it switches to the GAP device name once iOS has read that, and the two often differ.
+        let advertised = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier = peripheral.identifier
         DispatchQueue.main.async {
             self.obdDelegate?.peripheralsUpdated(found)
+            if let advertised, !advertised.isEmpty {
+                self.obdDelegate?.advertisedNameUpdated(advertised, for: identifier)
+            }
         }
     }
 
